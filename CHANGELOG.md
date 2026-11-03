@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3] - 2026-11-03
+
+- Harden `normalizeCommand`: a command string whose whole payload is a JSON-serialized argument
+  array (e.g. `["GET", "user:1"]`) is now parsed and executed as an argument array. Some MCP
+  clients stringify `anyOf` array parameters before sending them, which previously failed with
+  `Invalid command name "[GET,"`. Command lines that merely contain bracketed arguments are
+  unaffected — a command name can never start with `[`, so the fallback only applies to input
+  that previously errored.
+
 ## [0.1.2] - 2026-11-03
 
 - Add a `redis-switchboard-mcp` bin alias alongside `rsm`, so `npx -y redis-switchboard-mcp`

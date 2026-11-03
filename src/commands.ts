@@ -280,8 +280,29 @@ export function tokenizeCommand(input: string): string[] {
   return args;
 }
 
+function parseJsonArrayCommand(command: string): readonly string[] | null {
+  const trimmed = command.trim();
+  if (!trimmed.startsWith('[')) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+    return null;
+  }
+
+  return parsed as readonly string[];
+}
+
 export function normalizeCommand(command: string | readonly string[]): CommandArgs {
-  const rawArgs = typeof command === 'string' ? tokenizeCommand(command) : [...command];
+  const rawArgs =
+    typeof command === 'string' ? (parseJsonArrayCommand(command) ?? tokenizeCommand(command)) : [...command];
 
   if (rawArgs.length === 0) {
     throw new CommandSyntaxError('Command must not be empty.');

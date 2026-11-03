@@ -39,6 +39,31 @@ test('normalizeCommand uppercases the command and preserves arguments', () => {
   assert.deepEqual(normalizeCommand('  seT  key  value  '), ['SET', 'key', 'value']);
 });
 
+test('normalizeCommand recovers JSON-serialized command arrays', () => {
+  // Some MCP clients stringify anyOf array parameters before sending them.
+  assert.deepEqual(normalizeCommand('["GET", "user:1"]'), ['GET', 'user:1']);
+  assert.deepEqual(normalizeCommand(' ["SMEMBERS","app_token_code:123"] '), ['SMEMBERS', 'app_token_code:123']);
+  assert.deepEqual(normalizeCommand('["SET", "key", "a b c"]'), ['SET', 'key', 'a b c']);
+  assert.deepEqual(normalizeCommand('["GET", "key with \\"quotes\\""]'), ['GET', 'key with "quotes"']);
+});
+
+test('normalizeCommand rejects non-string JSON arrays and malformed JSON', () => {
+  assert.throws(() => normalizeCommand('[1, 2]'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('["GET", 1]'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('[GET, key]'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('"just a string"'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('{ "cmd": "GET" }'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('["GET"'), /Invalid command name/);
+  assert.throws(() => normalizeCommand('[]'), /must not be empty/);
+});
+
+test('normalizeCommand never hijacks legitimate command lines', () => {
+  // A command name can never start with '[', so JSON-array parsing only
+  // applies to input that previously failed with "Invalid command name".
+  assert.deepEqual(normalizeCommand('SET key "[not json]"'), ['SET', 'key', '[not json]']);
+  assert.deepEqual(normalizeCommand('GET [some:key]'), ['GET', '[some:key]']);
+});
+
 test('normalizeCommand validates command names and sizes', () => {
   assert.throws(() => normalizeCommand(''), /must not be empty/);
   assert.throws(() => normalizeCommand([]), /must not be empty/);

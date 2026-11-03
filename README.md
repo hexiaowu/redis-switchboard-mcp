@@ -292,7 +292,9 @@ Run one Redis command against a specific logical database.
 { "command": ["HGET", "user:42", "name"], "db": 4, "instance": "cache-prod" }
 ```
 
-- `command` is a command line (quotes and backslash escapes supported) or an argument array.
+- `command` is a command line (quotes and backslash escapes supported) or an argument array. A
+  command line whose whole payload is a JSON-serialized argument array (e.g. `["GET", "user:1"]`,
+  as produced by some MCP clients that stringify array parameters) is also accepted and parsed.
 - `db` selects the logical database per call. It defaults to the instance's `db`.
 - `instance` is required when several instances are configured without a default.
 - Write commands are rejected when the instance `mode` is `readonly`.

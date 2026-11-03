@@ -294,7 +294,9 @@ JSON 配置和 `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` 是**互斥**的：同时�
 { "command": ["HGET", "user:42", "name"], "db": 4, "instance": "cache-prod" }
 ```
 
-- `command` 可以是命令行（支持引号和反斜杠转义），也可以是参数数组。
+- `command` 可以是命令行（支持引号和反斜杠转义），也可以是参数数组。此外，如果命令行整体是一个
+  JSON 序列化的参数数组（如 `["GET", "user:1"]`，某些 MCP 客户端会把数组参数字符串化后发送），
+  也会被识别并按数组解析。
 - `db` 每次调用独立选择逻辑库，默认使用实例的 `db`。
 - 多实例且未配置默认实例时，必须传 `instance`。
 - 实例 `mode` 为 `readonly` 时，写命令会被拒绝。
