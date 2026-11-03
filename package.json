@@ -1,6 +1,6 @@
 {
   "name": "redis-switchboard-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A Redis MCP server that switches logical databases per request instead of relying on the connection-level SELECT command.",
   "keywords": [
     "mcp",
@@ -22,7 +22,8 @@
     }
   },
   "bin": {
-    "rsm": "dist/index.js"
+    "rsm": "dist/index.js",
+    "redis-switchboard-mcp": "dist/index.js"
   },
   "files": [
     "dist",

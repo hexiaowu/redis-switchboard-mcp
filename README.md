@@ -129,15 +129,10 @@ The same file can be selected with `REDIS_MCP_CONFIG=/path/to/config.json`.
 
 > **Note:** diagnostics are written to stderr. Never print to stdout from this process — the MCP transport owns it.
 
-> **Running from this repository:** if the MCP client sets `cwd` to the repository root,
-> `npx redis-switchboard-mcp` can treat the local package as the target and fail with
-> `sh: rsm: command not found`. Add `--prefix` pointing outside the repository so npx installs
-> from npm instead:
->
-> `"args": ["--prefix", "/absolute/path/to/.cache/redis-switchboard-mcp-npx", "-y", "redis-switchboard-mcp"]`
->
-> Alternatively use `node /absolute/path/to/redis-switchboard-mcp/dist/index.js` (run
-> `npm run build` first), a globally installed `rsm`, or run npx from outside the repository.
+> **Running from this repository:** version 0.1.2+ includes a `redis-switchboard-mcp` bin alias,
+> so `npx -y redis-switchboard-mcp` works even when the MCP client's `cwd` is the repository root.
+> For 0.1.1 and earlier, add `--prefix` pointing outside the repository or use
+> `node /absolute/path/to/redis-switchboard-mcp/dist/index.js` (run `npm run build` first).
 
 ---
 

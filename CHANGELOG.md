@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2] - 2026-11-03
+
+- Add a `redis-switchboard-mcp` bin alias alongside `rsm`, so `npx -y redis-switchboard-mcp`
+  works even when the current working directory is this repository. Without the alias, npx can
+  treat the local package as the target and fail with `sh: rsm: command not found`.
+
 ## [0.1.1] - 2026-11-03
 
 - Fix the npm README, which incorrectly said the package was not published. No runtime changes.

@@ -131,14 +131,10 @@ node dist/index.js
 
 > **注意：** 本进程的诊断日志全部写到 stderr。不要向 stdout 输出任何内容——stdout 属于 MCP 传输。
 
-> **在本仓库内运行：** 如果 MCP 客户端把 `cwd` 设为仓库根目录，
-> `npx redis-switchboard-mcp` 可能把当前本地包当成目标，报 `sh: rsm: command not found`。
-> 给 npx 加上指向仓库外目录的 `--prefix`，强制它从 npm 安装：
->
-> `"args": ["--prefix", "/absolute/path/to/.cache/redis-switchboard-mcp-npx", "-y", "redis-switchboard-mcp"]`
->
-> 也可以使用 `node /absolute/path/to/redis-switchboard-mcp/dist/index.js`（先 `npm run build`）、
-> 全局安装后的 `rsm`，或把 npx 放到仓库外目录执行。
+> **在本仓库内运行：** 0.1.2+ 增加了 `redis-switchboard-mcp` 这个 bin 别名，
+> 因此即使 MCP 客户端的 `cwd` 是仓库根目录，`npx -y redis-switchboard-mcp` 也能正常启动。
+> 0.1.1 及更早版本需要在 npx 上加 `--prefix` 指向仓库外目录，或使用
+> `node /absolute/path/to/redis-switchboard-mcp/dist/index.js`（先 `npm run build`）。
 
 ---
 
