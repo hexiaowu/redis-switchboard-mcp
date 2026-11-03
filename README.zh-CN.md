@@ -548,6 +548,51 @@ test/               单元、集成和 MCP 握手测试
 
 ---
 
+## 发布
+
+发布由 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) 自动化：
+
+- **发布 GitHub Release** 时触发，或通过 `workflow_dispatch` 手动指定已有 tag。
+- 检出对应 tag、安装依赖，然后执行 `npm publish --access public --provenance`。
+- 上传前 `prepublishOnly` 会跑类型检查、测试类型检查、构建和完整测试。
+
+### 一次性配置
+
+**方式 A：npm token（简单）**
+
+1. 创建 granular npm token，权限选 **Read and write**，包范围包含 `redis-switchboard-mcp`，并开启 **Bypass 2FA**。
+2. GitHub：**Settings → Secrets and variables → Actions → New repository secret**，名称 `NPM_TOKEN`，值为 token。
+
+**方式 B：npm Trusted Publishing（推荐，无长期 token）**
+
+1. 在 npm 包的设置页 → **Trusted Publisher → GitHub Actions**，填写 owner `hexiaowu`、repository `redis-switchboard-mcp`、workflow `publish.yml`。
+2. 删除 workflow 里的 `NODE_AUTH_TOKEN` 环境变量。workflow 已经包含 `id-token: write`。
+
+### 发布流程
+
+```bash
+# 1. 升版本并更新 CHANGELOG.md
+npm version patch --no-git-tag-version
+# 编辑 CHANGELOG.md
+
+# 2. 提交并打 tag
+git add package.json package-lock.json CHANGELOG.md
+git commit -m "chore: release v0.1.2"
+git tag -a v0.1.2 -m "v0.1.2"
+git push origin main --tags
+
+# 3. 创建 GitHub Release（会触发发布 workflow）
+gh release create v0.1.2 --title "v0.1.2" --notes "..."
+```
+
+workflow 成功后验证：
+
+```bash
+npm view redis-switchboard-mcp version dist-tags
+```
+
+不要把 npm token 或 `.npmrc` 提交到仓库。
+
 ## 许可证
 
 MIT

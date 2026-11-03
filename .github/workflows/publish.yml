@@ -1,0 +1,58 @@
+name: Publish npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to publish (for example v0.1.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  # Required for npm provenance and for npm Trusted Publishing (OIDC).
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Use the latest npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      # prepublishOnly runs typecheck, test typecheck, build and the full test
+      # suite. If any of them fail, npm publish stops before uploading.
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          # Add this secret in GitHub: Settings -> Secrets and variables -> Actions.
+          # Use a granular npm token with Read and write access and Bypass 2FA.
+          #
+          # For npm Trusted Publishing (OIDC, no long-lived token), configure the
+          # trusted publisher on npm for this repository and workflow, then remove
+          # this NODE_AUTH_TOKEN block.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

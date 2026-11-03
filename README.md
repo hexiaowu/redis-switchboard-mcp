@@ -547,6 +547,51 @@ test/               unit, integration and MCP handshake tests
 
 ---
 
+## Publishing
+
+Publishing is automated by [`.github/workflows/publish.yml`](.github/workflows/publish.yml):
+
+- Triggered when a **GitHub Release is published**, or manually via `workflow_dispatch` with an existing tag.
+- Checks out the tag, installs dependencies, then runs `npm publish --access public --provenance`.
+- `prepublishOnly` runs typecheck, test typecheck, build and the full test suite before uploading.
+
+### One-time setup
+
+**Option A: npm token (simple)**
+
+1. Create a granular npm access token with **Read and write** access to `redis-switchboard-mcp` and **Bypass 2FA** enabled.
+2. In GitHub: **Settings → Secrets and variables → Actions → New repository secret**, name `NPM_TOKEN`, value the token.
+
+**Option B: npm Trusted Publishing (recommended, no long-lived token)**
+
+1. On the npm package settings → **Trusted Publisher → GitHub Actions**, set owner `hexiaowu`, repository `redis-switchboard-mcp`, workflow `publish.yml`.
+2. Remove the `NODE_AUTH_TOKEN` env block from the workflow. The workflow already has `id-token: write`.
+
+### Release flow
+
+```bash
+# 1. Bump the version and update CHANGELOG.md
+npm version patch --no-git-tag-version
+# edit CHANGELOG.md
+
+# 2. Commit and tag
+git add package.json package-lock.json CHANGELOG.md
+git commit -m "chore: release v0.1.2"
+git tag -a v0.1.2 -m "v0.1.2"
+git push origin main --tags
+
+# 3. Create a GitHub Release (this triggers the publish workflow)
+gh release create v0.1.2 --title "v0.1.2" --notes "..."
+```
+
+After the workflow succeeds:
+
+```bash
+npm view redis-switchboard-mcp version dist-tags
+```
+
+Do not commit npm tokens or `.npmrc` files to the repository.
+
 ## License
 
 MIT
