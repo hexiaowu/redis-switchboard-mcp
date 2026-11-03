@@ -10,6 +10,38 @@ async function guard(client: FakeClient, instance: InstanceConfig, command: stri
   await enforceFetchLimit(client, normalizeCommand(command), instance);
 }
 
+/**
+ * FakeClient variant that can return different HSTRLEN values per field, so
+ * multi-field guards (HMGET) can be tested against a byte total.
+ */
+class PerFieldClient extends FakeClient {
+  hstrlenByField: Record<string, number> = {};
+
+  override async call(command: string, ...args: (string | number | Buffer)[]): Promise<unknown> {
+    this.calls.push({ command, args });
+    const upper = command.toUpperCase();
+    if (upper === 'HSTRLEN') {
+      const field = String(args[1] ?? '');
+      if (field in this.hstrlenByField) {
+        return this.hstrlenByField[field]!;
+      }
+    }
+    if (upper === 'MEMORY') {
+      if (this.memoryError !== undefined) {
+        throw this.memoryError;
+      }
+      return this.memoryReply;
+    }
+    if (this.callError !== undefined) {
+      throw this.callError;
+    }
+    if (Object.hasOwn(this.commandReplies, upper)) {
+      return this.commandReplies[upper];
+    }
+    return this.callReply;
+  }
+}
+
 test('GET is rejected when the string exceeds maxFetchChars', async () => {
   const client = new FakeClient();
   const instance = makeInstance({ maxFetchChars: 1_000 });
@@ -199,13 +231,287 @@ test('MGET is bounded by the total string size', async () => {
 test('HMGET is bounded by the requested field count', async () => {
   const client = new FakeClient();
   const instance = makeInstance({ maxFetchItems: 1_000 });
-  const fields = Array.from({ length: 1_001 }, (_value, index) => `f${index}`);
+  const tooManyFields = Array.from({ length: 101 }, (_value, index) => `f${index}`);
+  const okFields = Array.from({ length: 100 }, (_value, index) => `f${index}`);
 
   await assert.rejects(
-    () => enforceFetchLimit(client, normalizeCommand(['HMGET', 'h', ...fields]), instance),
+    () => enforceFetchLimit(client, normalizeCommand(['HMGET', 'h', ...tooManyFields]), instance),
+    /guard limit of 100/,
+  );
+  await enforceFetchLimit(client, normalizeCommand(['HMGET', 'h', ...okFields]), instance);
+  await enforceFetchLimit(client, normalizeCommand(['HMGET', 'h', 'f1', 'f2']), instance);
+});
+
+test('HMGET is bounded by the summed field sizes', async () => {
+  const client = new PerFieldClient();
+  const instance = makeInstance({ maxFetchChars: 1_000 });
+  client.hstrlenByField = { a: 600, b: 400 };
+
+  // 600 + 400 == maxFetchChars is allowed.
+  await guard(client, instance, 'HMGET h a b');
+
+  client.hstrlenByField = { a: 600, b: 401 };
+  await assert.rejects(() => guard(client, instance, 'HMGET h a b'), /total at least 1001 bytes/);
+});
+
+test('HMGET is rejected when the key memory exceeds maxFetchChars', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchChars: 1_000 });
+  client.memoryReply = 2_000;
+
+  await assert.rejects(() => guard(client, instance, 'HMGET h a b'), /maxFetchChars/);
+});
+
+test('keys named LIMIT or COUNT do not bypass the guards', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+  client.commandReplies.ZCARD = 5_000;
+  client.commandReplies.XLEN = 5_000;
+  client.memoryReply = 100;
+
+  await assert.rejects(
+    () => guard(client, instance, 'ZRANGEBYSCORE LIMIT -inf +inf'),
     /maxFetchItems/,
   );
-  await enforceFetchLimit(client, normalizeCommand(['HMGET', 'h', 'f1', 'f2']), instance);
+  await assert.rejects(() => guard(client, instance, 'XRANGE COUNT - +'), /maxFetchItems/);
+  // The real COUNT option after a key named COUNT is still honored.
+  await guard(client, instance, 'XRANGE COUNT - + COUNT 10');
+  await guard(client, instance, 'ZRANGEBYSCORE LIMIT -inf +inf LIMIT 0 100');
+
+  await assert.rejects(() => guard(client, instance, 'GEORADIUS_RO COUNT 1 2 3 km'), /maxFetchItems/);
+  client.commandReplies.ZCARD = 10;
+  // A member named COUNT must not shadow (or be mistaken for) the COUNT option.
+  await guard(client, instance, 'GEORADIUSBYMEMBER_RO geo COUNT 10 km');
+  await guard(client, instance, 'GEOSEARCH geo FROMMEMBER COUNT BYRADIUS 1 km COUNT 10');
+});
+
+test('LPOS COUNT 0 and oversized counts are rejected', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(() => guard(client, instance, 'LPOS list el COUNT 0'), /all matches/);
+  await assert.rejects(() => guard(client, instance, 'LPOS list el COUNT 5000'), /maxFetchItems/);
+  await assert.rejects(() => guard(client, instance, 'LPOS list el RANK 1 COUNT 5000'), /maxFetchItems/);
+  await guard(client, instance, 'LPOS list el COUNT 100');
+  await guard(client, instance, 'LPOS list el');
+  // The element sits at args[2], so an element named COUNT is not an option.
+  await guard(client, instance, 'LPOS list COUNT COUNT 100');
+});
+
+test('XINFO STREAM FULL COUNT is bounded', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.memoryReply = 100;
+
+  await assert.rejects(() => guard(client, instance, 'XINFO STREAM big FULL COUNT 0'), /all stream entries/);
+  await assert.rejects(() => guard(client, instance, 'XINFO STREAM big FULL COUNT 5000'), /maxFetchItems/);
+  await guard(client, instance, 'XINFO STREAM big FULL COUNT 100');
+  await guard(client, instance, 'XINFO STREAM big FULL');
+  await guard(client, instance, 'XINFO STREAM big');
+  await guard(client, instance, 'XINFO GROUPS big');
+
+  client.memoryReply = 2_000;
+  await assert.rejects(() => guard(client, instance, 'XINFO STREAM big'), /maxFetchChars/);
+});
+
+test('XPENDING extended form count is capped', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(
+    () => guard(client, instance, 'XPENDING stream group - + 10000000'),
+    /maxFetchItems/,
+  );
+  await guard(client, instance, 'XPENDING stream group');
+  await guard(client, instance, 'XPENDING stream group - + 100');
+  await guard(client, instance, 'XPENDING stream group - + 100 consumer');
+  await guard(client, instance, 'XPENDING stream group 0 5000 10');
+});
+
+test('MEMORY USAGE SAMPLES 0 is rejected', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(() => guard(client, instance, 'MEMORY USAGE big SAMPLES 0'), /SAMPLES 0/);
+  await guard(client, instance, 'MEMORY USAGE big SAMPLES 5');
+  await guard(client, instance, 'MEMORY USAGE big');
+  await guard(client, instance, 'MEMORY STATS');
+});
+
+test('COMMAND allows only small subcommands', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(() => guard(client, instance, 'COMMAND'), /COMMAND is rejected/);
+  await assert.rejects(() => guard(client, instance, 'COMMAND LIST'), /COMMAND is rejected/);
+  await assert.rejects(() => guard(client, instance, 'COMMAND DOCS'), /COMMAND is rejected/);
+  await assert.rejects(() => guard(client, instance, 'COMMAND INFO'), /COMMAND is rejected/);
+  await guard(client, instance, 'COMMAND COUNT');
+  await guard(client, instance, 'COMMAND GETKEYS SET a b');
+  await guard(client, instance, 'COMMAND GETKEYSANDFLAGS SET a b');
+});
+
+test('SET with GET is bounded by the old value size', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchChars: 1_000 });
+  client.commandReplies.STRLEN = 2_000;
+
+  await assert.rejects(() => guard(client, instance, 'SET key value GET'), /old value/);
+  await assert.rejects(() => guard(client, instance, 'SET key value EX 10 GET'), /old value/);
+  await assert.rejects(() => guard(client, instance, 'SET key GET GET'), /old value/);
+  await guard(client, instance, 'SET key value');
+  // A value literally named GET without the GET option is not checked.
+  await guard(client, instance, 'SET key GET');
+
+  client.commandReplies.STRLEN = 100;
+  await guard(client, instance, 'SET key value GET');
+});
+
+test('LMPOP/ZMPOP COUNT is capped and the key memory is checked', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.memoryReply = 100;
+
+  await assert.rejects(() => guard(client, instance, 'LMPOP 1 list LEFT COUNT 5000'), /maxFetchItems/);
+  await assert.rejects(() => guard(client, instance, 'ZMPOP 1 zset MIN COUNT 5000'), /maxFetchItems/);
+  await guard(client, instance, 'LMPOP 1 list LEFT COUNT 100');
+  await guard(client, instance, 'LMPOP 1 list LEFT');
+  await guard(client, instance, 'ZMPOP 1 zset MAX COUNT 100');
+
+  client.memoryReply = 2_000;
+  await assert.rejects(() => guard(client, instance, 'LMPOP 1 list LEFT'), /maxFetchChars/);
+});
+
+test('GEORADIUS/GEORADIUSBYMEMBER without COUNT are rejected and STORE is allowed', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000_000 });
+  client.commandReplies.ZCARD = 5_000;
+  client.memoryReply = 100;
+
+  await assert.rejects(() => guard(client, instance, 'GEORADIUS geo 1 2 100 km'), /maxFetchItems/);
+  await assert.rejects(
+    () => guard(client, instance, 'GEORADIUSBYMEMBER geo member 100 km'),
+    /maxFetchItems/,
+  );
+  await guard(client, instance, 'GEORADIUS geo 1 2 100 km COUNT 10');
+  await guard(client, instance, 'GEORADIUS geo 1 2 100 km STORE dest');
+  await guard(client, instance, 'GEORADIUS geo 1 2 100 km COUNT 10 STORE dest');
+  await guard(client, instance, 'GEORADIUSBYMEMBER geo member 100 km STOREDIST dest');
+
+  client.commandReplies.ZCARD = 10;
+  await guard(client, instance, 'GEORADIUS geo 1 2 100 km');
+});
+
+test('XAUTOCLAIM COUNT is capped', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(
+    () => guard(client, instance, 'XAUTOCLAIM stream group consumer 0 COUNT 5000'),
+    /maxFetchItems/,
+  );
+  await guard(client, instance, 'XAUTOCLAIM stream group consumer 0 COUNT 100');
+  await guard(client, instance, 'XAUTOCLAIM stream group consumer 0 0-0 COUNT 100');
+  await guard(client, instance, 'XAUTOCLAIM stream group consumer 0');
+});
+
+test('SLOWLOG GET count is capped', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+
+  await assert.rejects(() => guard(client, instance, 'SLOWLOG GET 5000'), /maxFetchItems/);
+  await guard(client, instance, 'SLOWLOG GET 100');
+  await guard(client, instance, 'SLOWLOG GET');
+  await guard(client, instance, 'SLOWLOG LEN');
+});
+
+test('SORT_RO GET patterns multiply the reply size', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000 });
+  client.commandReplies.TYPE = 'list';
+  client.commandReplies.LLEN = 10;
+
+  const manyGets = Array.from({ length: 50 }, (_value, index) => `GET obj:${index}`).join(' ');
+  await assert.rejects(
+    () => guard(client, instance, `SORT_RO src LIMIT 0 100 ${manyGets}`),
+    /GET patterns/,
+  );
+  // 10 items × 51 = 510 is still within maxFetchItems.
+  await guard(client, instance, `SORT_RO src LIMIT 0 10 ${manyGets}`);
+
+  const hugeGets = Array.from({ length: 100 }, (_value, index) => `GET obj:${index}`).join(' ');
+  await assert.rejects(
+    () => guard(client, instance, `SORT_RO src ${hugeGets}`),
+    /GET patterns/,
+  );
+  const okGets = Array.from({ length: 98 }, (_value, index) => `GET obj:${index}`).join(' ');
+  // 10 items × 99 = 990 is still within maxFetchItems.
+  await guard(client, instance, `SORT_RO src LIMIT 0 10 ${okGets}`);
+  await guard(client, instance, 'SORT_RO src LIMIT 0 10');
+  await guard(client, instance, 'SORT src LIMIT 0 10 STORE dst');
+});
+
+test('SORT/STORE replies are not bounded by the source size', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.commandReplies.TYPE = 'list';
+  client.commandReplies.LLEN = 5_000;
+  client.memoryReply = 100;
+
+  await guard(client, instance, 'SORT big STORE dst');
+  await guard(client, instance, 'SORT big LIMIT 0 10 STORE dst');
+
+  client.memoryReply = 2_000;
+  await assert.rejects(() => guard(client, instance, 'SORT big STORE dst'), /maxFetchChars/);
+});
+
+test('multi-key operations sum MEMORY USAGE across keys', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.commandReplies.SCARD = 10;
+  client.commandReplies.ZCARD = 10;
+
+  client.memoryReply = 600;
+  await assert.rejects(() => guard(client, instance, 'SUNION a b'), /in total/);
+  await assert.rejects(() => guard(client, instance, 'ZUNION 2 a b'), /in total/);
+
+  client.memoryReply = 400;
+  await guard(client, instance, 'SUNION a b');
+  await guard(client, instance, 'ZUNION 2 a b');
+  await guard(client, instance, 'ZINTER 2 a b');
+  await guard(client, instance, 'ZDIFF 2 a b');
+  await guard(client, instance, 'SINTER a b');
+  await guard(client, instance, 'SDIFF a b');
+});
+
+test('single-key pops and random reads check the key memory', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.memoryReply = 2_000;
+
+  await assert.rejects(() => guard(client, instance, 'LPOP key'), /maxFetchChars/);
+  await assert.rejects(() => guard(client, instance, 'SPOP key'), /maxFetchChars/);
+  await assert.rejects(() => guard(client, instance, 'ZPOPMIN key 10'), /maxFetchChars/);
+  await assert.rejects(() => guard(client, instance, 'SRANDMEMBER key 10'), /maxFetchChars/);
+  await assert.rejects(() => guard(client, instance, 'HRANDFIELD key'), /maxFetchChars/);
+  await assert.rejects(() => guard(client, instance, 'ZRANDMEMBER key 10 WITHSCORES'), /maxFetchChars/);
+
+  client.memoryReply = 100;
+  await guard(client, instance, 'LPOP key');
+  await guard(client, instance, 'SPOP key 10');
+  await guard(client, instance, 'SRANDMEMBER key 10');
+});
+
+test('size probes fail closed when they time out', async () => {
+  const client = new FakeClient();
+  const instance = makeInstance({ maxFetchItems: 1_000, maxFetchChars: 1_000 });
+  client.callError = new Error('Command timed out after 1000 ms.');
+
+  await assert.rejects(() => guard(client, instance, 'GET big'), /timed out/);
+  await assert.rejects(() => guard(client, instance, 'DUMP big'), /timed out/);
+  await assert.rejects(() => guard(client, instance, 'HMGET h a'), /timed out/);
+  await assert.rejects(() => guard(client, instance, 'SORT_RO list'), /timed out/);
+  await assert.rejects(() => guard(client, instance, 'LRANGE big 0 9'), /timed out/);
 });
 
 test('SORT_RO is bounded by LIMIT or source list size', async () => {
@@ -243,6 +549,8 @@ test('HGET, DUMP and GEOSEARCH are guarded', async () => {
 
   await assert.rejects(() => guard(client, instance, 'HGET h f'), /maxFetchChars/);
   await assert.rejects(() => guard(client, instance, 'DUMP big'), /maxFetchChars/);
+
+  client.memoryReply = 100;
   await assert.rejects(
     () => guard(client, instance, 'GEOSEARCH geo FROMMEMBER m BYRADIUS 1 km'),
     /maxFetchItems/,

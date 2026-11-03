@@ -5,6 +5,7 @@ import { CommandRejectedError, errorMessage } from './errors.js';
 
 const MAX_SET_OPERATION_KEYS = 64;
 const MAX_BULK_KEYS = 100;
+const MAX_HMGET_FIELDS = 100;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BIGINT = -MAX_SAFE_BIGINT;
 
@@ -28,6 +29,9 @@ export async function enforceFetchLimit(
     case 'GETSET':
       await guardGet(client, args, instance);
       return;
+    case 'SET':
+      await guardSet(client, args, instance);
+      return;
     case 'HGET':
       await guardHGet(client, args, instance);
       return;
@@ -40,6 +44,9 @@ export async function enforceFetchLimit(
       return;
     case 'LRANGE':
       await guardListRange(client, args, instance);
+      return;
+    case 'LPOS':
+      guardLPos(args, instance);
       return;
     case 'HGETALL':
     case 'HKEYS':
@@ -62,7 +69,7 @@ export async function enforceFetchLimit(
       await guardMGet(client, args, instance);
       return;
     case 'HMGET':
-      guardHMGet(args, instance);
+      await guardHMGet(client, args, instance);
       return;
     case 'SORT':
     case 'SORT_RO':
@@ -77,9 +84,28 @@ export async function enforceFetchLimit(
       await guardLcs(client, args, instance);
       return;
     case 'GEOSEARCH':
+    case 'GEORADIUS':
     case 'GEORADIUS_RO':
+    case 'GEORADIUSBYMEMBER':
     case 'GEORADIUSBYMEMBER_RO':
       await guardGeoSearch(client, args, instance);
+      return;
+    case 'LMPOP':
+    case 'ZMPOP':
+      await guardMPop(client, args, instance);
+      return;
+    case 'XINFO':
+      await guardXInfo(client, args, instance);
+      return;
+    case 'XPENDING':
+      guardXPending(args, instance);
+      return;
+    case 'XAUTOCLAIM':
+      guardXAutoClaim(args, instance);
+      return;
+    case 'XRANGE':
+    case 'XREVRANGE':
+      await guardXRange(client, args, instance);
       return;
     case 'SMEMBERS':
       await guardBulkCollection(
@@ -101,14 +127,10 @@ export async function enforceFetchLimit(
     case 'ZREVRANGEBYLEX':
       await guardZRangeBy(client, args, instance);
       return;
-    case 'XRANGE':
-    case 'XREVRANGE':
-      await guardXRange(client, args, instance);
-      return;
     case 'HRANDFIELD':
     case 'SRANDMEMBER':
     case 'ZRANDMEMBER':
-      guardRandom(args, instance);
+      await guardRandom(client, args, instance);
       return;
     case 'SINTER':
     case 'SUNION':
@@ -120,7 +142,16 @@ export async function enforceFetchLimit(
     case 'SPOP':
     case 'ZPOPMIN':
     case 'ZPOPMAX':
-      guardPopCount(args, instance);
+      await guardPopCount(client, args, instance);
+      return;
+    case 'MEMORY':
+      guardMemory(args, instance);
+      return;
+    case 'COMMAND':
+      guardCommand(args);
+      return;
+    case 'SLOWLOG':
+      guardSlowLog(args, instance);
       return;
     default:
       return;
@@ -142,6 +173,27 @@ async function guardGet(
     throw new CommandRejectedError(
       `GET is rejected: the string is ${length} bytes (maxFetchChars=${instance.maxFetchChars}). ` +
         'Use GETRANGE or read_page kind="string" to fetch it in pages.',
+    );
+  }
+}
+
+async function guardSet(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
+  // SET key value ... GET returns the old value unbounded, so the same STRLEN
+  // check as guardGet applies. The GET option takes no value; scanning from
+  // index 3 (after key/value) keeps a value literally named GET from matching.
+  if (args[1] === undefined || findOptionIndex(args, 'GET', 3, false) === -1) {
+    return;
+  }
+
+  const length = await numberReply(client, 'STRLEN', args[1]);
+  if (length !== null && length > instance.maxFetchChars) {
+    throw new CommandRejectedError(
+      `SET ... GET is rejected: the old value is ${length} bytes (maxFetchChars=${instance.maxFetchChars}). ` +
+        'Use GETRANGE or read_page kind="string" to fetch the old value in pages.',
     );
   }
 }
@@ -336,18 +388,74 @@ async function guardMGet(
   }
 }
 
-function guardHMGet(args: CommandArgs, instance: InstanceConfig): void {
+async function guardHMGet(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
   if (args.length < 2) {
     return;
   }
 
-  const fields = args.length - 2;
-  if (fields > instance.maxFetchItems) {
+  const key = args[1];
+  if (key === undefined) {
+    return;
+  }
+
+  const fields = args.slice(2);
+  if (fields.length === 0) {
+    return;
+  }
+
+  if (fields.length > MAX_HMGET_FIELDS) {
     throw new CommandRejectedError(
-      `HMGET is rejected: ${fields} requested fields exceed maxFetchItems=${instance.maxFetchItems}. ` +
-        'Use read_page kind="hash" or split the request.',
+      `HMGET is rejected: ${fields.length} requested fields exceed the guard limit of ${MAX_HMGET_FIELDS}. ` +
+        'Use read_page kind="hash" or HSCAN with COUNT.',
     );
   }
+
+  // Field count alone does not bound the reply: a single field value can be
+  // hundreds of megabytes, so sum the field sizes before the command runs.
+  const lengths = await Promise.all(fields.map((field) => numberReply(client, 'HSTRLEN', key, field)));
+  let total = 0;
+  for (const length of lengths) {
+    if (length === null) {
+      continue;
+    }
+    total += length;
+    if (total > instance.maxFetchChars) {
+      throw new CommandRejectedError(
+        `HMGET is rejected: the requested fields total at least ${total} bytes ` +
+          `(maxFetchChars=${instance.maxFetchChars}). Use read_page kind="hash" or fetch fewer fields.`,
+      );
+    }
+  }
+
+  const memory = await memoryUsage(client, key);
+  checkMemory('HMGET', memory, instance, 'Use read_page kind="hash" to fetch it in pages.');
+}
+
+/**
+ * Find the first occurrence of `token` at or after `from` and return its index.
+ * When `requireIntegerValue` is set, the token only counts if the next argument
+ * parses as an integer, so an argument literally named COUNT/LIMIT (a key, a
+ * score, a member) cannot shadow the real option.
+ */
+function findOptionIndex(
+  args: CommandArgs,
+  token: string,
+  from: number,
+  requireIntegerValue: boolean,
+): number {
+  for (let index = Math.max(from, 0); index < args.length; index += 1) {
+    if (args[index]!.toUpperCase() !== token) {
+      continue;
+    }
+    if (!requireIntegerValue || parseInteger(args[index + 1]) !== null) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function findSortLimit(args: CommandArgs): number | null {
@@ -373,6 +481,57 @@ function findSortLimit(args: CommandArgs): number | null {
   return null;
 }
 
+/**
+ * Walk SORT/SORT_RO options the way findSortLimit does and report whether a
+ * STORE or STOREDIST destination is present; those forms reply with a small
+ * integer instead of the sorted elements.
+ */
+function sortHasStore(args: CommandArgs): boolean {
+  let index = 2;
+
+  while (index < args.length) {
+    const token = args[index]!.toUpperCase();
+    if (token === 'LIMIT') {
+      index += 3;
+    } else if (token === 'BY' || token === 'GET') {
+      // Skip the pattern argument; it may itself be named STORE.
+      index += 2;
+    } else if (token === 'STORE' || token === 'STOREDIST') {
+      return true;
+    } else {
+      index += 1;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Count the GET patterns of a SORT/SORT_RO command; each one multiplies the
+ * number of values the reply contains. Returns the raw GET count.
+ */
+function countSortGets(args: CommandArgs): number {
+  let gets = 0;
+  let index = 2;
+
+  while (index < args.length) {
+    const token = args[index]!.toUpperCase();
+    if (token === 'LIMIT') {
+      index += 3;
+    } else if (token === 'BY' || token === 'GET' || token === 'STORE' || token === 'STOREDIST') {
+      if (token === 'GET') {
+        gets += 1;
+      }
+      // Skip the pattern/destination argument; it may itself be named GET.
+      index += 2;
+    } else {
+      index += 1;
+    }
+  }
+
+  return gets;
+}
+
 async function guardSortRo(
   client: RedisClient,
   args: CommandArgs,
@@ -383,6 +542,15 @@ async function guardSortRo(
     return;
   }
 
+  // SORT ... STORE / STOREDIST replies with the number of stored elements, so
+  // the reply-size checks do not apply (the source is still read server-side).
+  if (sortHasStore(args)) {
+    const memory = await memoryUsage(client, key);
+    checkMemory(args[0], memory, instance, 'Use a smaller source or read_page.');
+    return;
+  }
+
+  const multiplier = 1 + countSortGets(args);
   const sortLimit = findSortLimit(args);
   if (sortLimit !== null) {
     if (sortLimit < 0) {
@@ -393,6 +561,13 @@ async function guardSortRo(
     if (sortLimit > instance.maxFetchItems) {
       throw new CommandRejectedError(
         `${args[0]} is rejected: LIMIT count ${sortLimit} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+      );
+    }
+    if (sortLimit * multiplier > instance.maxFetchItems) {
+      throw new CommandRejectedError(
+        `${args[0]} is rejected: LIMIT ${sortLimit} items × ${multiplier} GET patterns can return up to ` +
+          `${sortLimit * multiplier} values (maxFetchItems=${instance.maxFetchItems}). ` +
+          'Reduce the LIMIT or the number of GET patterns.',
       );
     }
     return;
@@ -408,10 +583,11 @@ async function guardSortRo(
   ]);
 
   checkMemory('SORT_RO', memory, instance, 'Use SORT_RO ... LIMIT or read_page.');
-  if (length !== null && length > instance.maxFetchItems) {
+  if (length !== null && length * multiplier > instance.maxFetchItems) {
     throw new CommandRejectedError(
-      `SORT_RO is rejected: the source has ${length} items (maxFetchItems=${instance.maxFetchItems}). ` +
-        'Use SORT_RO ... LIMIT or read_page.',
+      `${args[0]} is rejected: the source has ${length} items × ${multiplier} GET patterns, so up to ` +
+        `${length * multiplier} values can be returned (maxFetchItems=${instance.maxFetchItems}). ` +
+        'Use SORT_RO ... LIMIT, fewer GET patterns, or read_page.',
     );
   }
 }
@@ -434,6 +610,21 @@ async function guardZSetOperation(
   const keys = args.slice(2, 2 + numKeys);
   if (keys.length !== numKeys) {
     return;
+  }
+
+  const memories = await Promise.all(keys.map((key) => memoryUsage(client, key)));
+  let totalMemory = 0;
+  for (const memory of memories) {
+    if (memory === null) {
+      continue;
+    }
+    totalMemory += memory;
+    if (totalMemory > instance.maxFetchChars) {
+      throw new CommandRejectedError(
+        `${args[0]} is rejected: the input keys use about ${totalMemory} bytes in total ` +
+          `(maxFetchChars=${instance.maxFetchChars}). Use read_page kind="zset" or smaller inputs.`,
+      );
+    }
   }
 
   const sizes = await Promise.all(keys.map((key) => numberReply(client, 'ZCARD', key)));
@@ -469,19 +660,37 @@ async function guardGeoSearch(
     return;
   }
 
-  const upper = args.map((arg) => arg.toUpperCase());
-  const countIndex = upper.indexOf('COUNT');
+  const command = args[0];
+  // Options start after key lng lat radius unit / key member radius unit for
+  // the GEORADIUS-family commands; GEOSEARCH grammar is variable, so scan from
+  // the key with the "next token must be an integer" rule.
+  const from = command === 'GEOSEARCH' ? 2 : 5;
+
+  const memory = await memoryUsage(client, key);
+  checkMemory(command, memory, instance, 'Add COUNT or use read_page.');
+
+  // Only GEORADIUS/GEORADIUSBYMEMBER support STORE/STOREDIST; those forms reply
+  // with a small integer instead of the matched members.
+  if (
+    (command === 'GEORADIUS' || command === 'GEORADIUSBYMEMBER') &&
+    (findOptionIndex(args, 'STORE', from, false) !== -1 ||
+      findOptionIndex(args, 'STOREDIST', from, false) !== -1)
+  ) {
+    return;
+  }
+
+  const countIndex = findOptionIndex(args, 'COUNT', from, true);
   const count = countIndex === -1 ? null : parseInteger(args[countIndex + 1]);
 
   if (count !== null) {
     if (count < 0) {
       throw new CommandRejectedError(
-        `${args[0]} is rejected: COUNT ${count} is negative. Use a non-negative COUNT.`,
+        `${command} is rejected: COUNT ${count} is negative. Use a non-negative COUNT.`,
       );
     }
     if (count > instance.maxFetchItems) {
       throw new CommandRejectedError(
-        `${args[0]} is rejected: COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+        `${command} is rejected: COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
       );
     }
     return;
@@ -490,7 +699,7 @@ async function guardGeoSearch(
   const cardinality = await numberReply(client, 'ZCARD', key);
   if (cardinality !== null && cardinality > instance.maxFetchItems) {
     throw new CommandRejectedError(
-      `${args[0]} is rejected: without COUNT it can return up to ${cardinality} members ` +
+      `${command} is rejected: without COUNT it can return up to ${cardinality} members ` +
         `(maxFetchItems=${instance.maxFetchItems}). Add COUNT or use read_page.`,
     );
   }
@@ -600,8 +809,9 @@ async function guardZRangeBy(
     return;
   }
 
-  const upper = args.map((arg) => arg.toUpperCase());
-  const limitIndex = upper.indexOf('LIMIT');
+  // Options start after key/min/max; a key or score literally named LIMIT must
+  // not shadow the real option, so require the next token to be an integer.
+  const limitIndex = findOptionIndex(args, 'LIMIT', 4, true);
   const [cardinality, memory] = await Promise.all([
     numberReply(client, 'ZCARD', key),
     memoryUsage(client, key),
@@ -642,8 +852,9 @@ async function guardXRange(
     return;
   }
 
-  const upper = args.map((arg) => arg.toUpperCase());
-  const countIndex = upper.indexOf('COUNT');
+  // Options start after key/start/end; a key literally named COUNT must not
+  // shadow the real option, so require the next token to be an integer.
+  const countIndex = findOptionIndex(args, 'COUNT', 4, true);
   const [length, memory] = await Promise.all([
     numberReply(client, 'XLEN', key),
     memoryUsage(client, key),
@@ -674,46 +885,253 @@ async function guardXRange(
   }
 }
 
-function guardRandom(args: CommandArgs, instance: InstanceConfig): void {
-  if (args.length < 3) {
+async function guardRandom(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
+  const key = args[1];
+  if (key === undefined) {
     return;
   }
 
-  const count = parseInteger(args[2]);
+  if (args.length >= 3) {
+    const count = parseInteger(args[2]);
+    if (count !== null) {
+      if (count < 0) {
+        throw new CommandRejectedError(
+          `${args[0]} is rejected: a negative count can return an unbounded number of duplicate items. ` +
+            'Use a positive count or read_page.',
+        );
+      }
+      if (count > instance.maxFetchItems) {
+        throw new CommandRejectedError(
+          `${args[0]} is rejected: count ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+        );
+      }
+    }
+  }
+
+  // A single hash field or set member can itself be hundreds of megabytes.
+  const memory = await memoryUsage(client, key);
+  checkMemory(args[0], memory, instance, 'Use read_page or a smaller count.');
+}
+
+async function guardPopCount(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
+  const key = args[1];
+  if (key === undefined) {
+    return;
+  }
+
+  if (args.length >= 3) {
+    const count = parseInteger(args[2]);
+    if (count !== null) {
+      if (count < 0) {
+        throw new CommandRejectedError(
+          `${args[0]} is rejected: a negative count is not useful here. Use a positive count.`,
+        );
+      }
+      if (count > instance.maxFetchItems) {
+        throw new CommandRejectedError(
+          `${args[0]} is rejected: count ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+        );
+      }
+    }
+  }
+
+  // A single popped element can itself be hundreds of megabytes.
+  const memory = await memoryUsage(client, key);
+  checkMemory(args[0], memory, instance, 'Use read_page or a smaller count.');
+}
+
+function guardLPos(args: CommandArgs, instance: InstanceConfig): void {
+  // LPOS key element [RANK rank] [COUNT count] [MAXLEN len]; the element sits
+  // at args[2], so options start at index 3. COUNT 0 returns all matches.
+  const countIndex = findOptionIndex(args, 'COUNT', 3, true);
+  if (countIndex === -1) {
+    return;
+  }
+
+  const count = parseInteger(args[countIndex + 1]);
   if (count === null) {
     return;
   }
-
+  if (count === 0) {
+    throw new CommandRejectedError(
+      `${args[0]} is rejected: COUNT 0 returns all matches. ` +
+        `Use a positive COUNT up to maxFetchItems=${instance.maxFetchItems} or read_page kind="list".`,
+    );
+  }
   if (count < 0) {
     throw new CommandRejectedError(
-      `${args[0]} is rejected: a negative count can return an unbounded number of duplicate items. ` +
-        'Use a positive count or read_page.',
+      `${args[0]} is rejected: COUNT ${count} is negative. Use a positive COUNT or read_page kind="list".`,
     );
   }
   if (count > instance.maxFetchItems) {
     throw new CommandRejectedError(
-      `${args[0]} is rejected: count ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+      `${args[0]} is rejected: COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
     );
   }
 }
 
-function guardPopCount(args: CommandArgs, instance: InstanceConfig): void {
-  if (args.length < 3) {
+async function guardMPop(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
+  // LMPOP/ZMPOP nkeys key [key ...] LEFT|RIGHT [COUNT count]; the first key is
+  // args[2] and the COUNT option cannot appear before index 4.
+  const key = args[2];
+  if (key === undefined) {
     return;
   }
 
-  const count = parseInteger(args[2]);
+  const memory = await memoryUsage(client, key);
+  checkMemory(args[0], memory, instance, 'Use read_page kind="list" or kind="zset" to inspect the source.');
+
+  const countIndex = findOptionIndex(args, 'COUNT', 4, true);
+  if (countIndex === -1) {
+    return;
+  }
+
+  const count = parseInteger(args[countIndex + 1]);
+  if (count !== null && count > instance.maxFetchItems) {
+    throw new CommandRejectedError(
+      `${args[0]} is rejected: COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+    );
+  }
+}
+
+async function guardXInfo(
+  client: RedisClient,
+  args: CommandArgs,
+  instance: InstanceConfig,
+): Promise<void> {
+  // XINFO CONSUMERS/GROUPS replies are small; only the STREAM subcommand can
+  // serialize the whole stream (via FULL).
+  if (args[1]?.toUpperCase() !== 'STREAM' || args[2] === undefined) {
+    return;
+  }
+
+  const memory = await memoryUsage(client, args[2]);
+  checkMemory('XINFO', memory, instance, 'Use XLEN or read_page kind="stream" instead.');
+
+  if (findOptionIndex(args, 'FULL', 3, false) === -1) {
+    return;
+  }
+
+  const countIndex = findOptionIndex(args, 'COUNT', 3, true);
+  if (countIndex === -1) {
+    return;
+  }
+
+  const count = parseInteger(args[countIndex + 1]);
   if (count === null) {
     return;
   }
-  if (count < 0) {
+  if (count === 0) {
     throw new CommandRejectedError(
-      `${args[0]} is rejected: a negative count is not useful here. Use a positive count.`,
+      `XINFO is rejected: FULL COUNT 0 returns all stream entries. ` +
+        `Use a positive COUNT up to maxFetchItems=${instance.maxFetchItems} or read_page kind="stream".`,
     );
   }
   if (count > instance.maxFetchItems) {
     throw new CommandRejectedError(
-      `${args[0]} is rejected: count ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+      `XINFO is rejected: FULL COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+    );
+  }
+}
+
+function guardXPending(args: CommandArgs, instance: InstanceConfig): void {
+  // Summary form XPENDING key group is a small reply; allow it.
+  if (args.length <= 3) {
+    return;
+  }
+
+  // Extended form: XPENDING key group [IDLE ms] start end count [consumer].
+  let index = 3;
+  if (args[index]!.toUpperCase() === 'IDLE') {
+    index += 2;
+  }
+
+  const count = parseInteger(args[index + 2]);
+  if (count === null) {
+    return;
+  }
+  if (count > instance.maxFetchItems) {
+    throw new CommandRejectedError(
+      `${args[0]} is rejected: ${count} pending entries exceed maxFetchItems=${instance.maxFetchItems}. ` +
+        'Use a smaller count or read_page kind="stream".',
+    );
+  }
+}
+
+function guardXAutoClaim(args: CommandArgs, instance: InstanceConfig): void {
+  // XAUTOCLAIM key group consumer min-idle [start] [COUNT count] [JUSTID].
+  // Scanning from index 4 keeps a consumer literally named COUNT from
+  // matching against its own min-idle argument.
+  const countIndex = findOptionIndex(args, 'COUNT', 4, true);
+  if (countIndex === -1) {
+    return;
+  }
+
+  const count = parseInteger(args[countIndex + 1]);
+  if (count !== null && count > instance.maxFetchItems) {
+    throw new CommandRejectedError(
+      `${args[0]} is rejected: COUNT ${count} exceeds maxFetchItems=${instance.maxFetchItems}.`,
+    );
+  }
+}
+
+function guardMemory(args: CommandArgs, instance: InstanceConfig): void {
+  // Other MEMORY subcommands (STATS, DOCTOR, ...) reply with small summaries.
+  if (args[1]?.toUpperCase() !== 'USAGE' || args[2] === undefined) {
+    return;
+  }
+
+  const samplesIndex = findOptionIndex(args, 'SAMPLES', 3, true);
+  if (samplesIndex === -1) {
+    return;
+  }
+
+  const samples = parseInteger(args[samplesIndex + 1]);
+  if (samples !== null && samples <= 0) {
+    throw new CommandRejectedError(
+      `MEMORY USAGE is rejected: SAMPLES ${samples} estimates every internal sample, which is O(N) server work. ` +
+        'Use a small positive SAMPLES count.',
+    );
+  }
+}
+
+function guardCommand(args: CommandArgs): void {
+  // The full command table (LIST/DOCS/INFO) is well over 1 MB; only the small
+  // subcommands are allowed through.
+  const subcommand = args[1]?.toUpperCase();
+  if (subcommand === 'COUNT' || subcommand === 'GETKEYS' || subcommand === 'GETKEYSANDFLAGS') {
+    return;
+  }
+
+  throw new CommandRejectedError(
+    'COMMAND is rejected: the full command table (LIST/DOCS/INFO) is large. ' +
+      'Use COMMAND COUNT, COMMAND GETKEYS or COMMAND GETKEYSANDFLAGS instead.',
+  );
+}
+
+function guardSlowLog(args: CommandArgs, instance: InstanceConfig): void {
+  // SLOWLOG LEN replies with a small integer.
+  if (args[1]?.toUpperCase() !== 'GET') {
+    return;
+  }
+
+  const count = parseInteger(args[2]);
+  if (count !== null && count > instance.maxFetchItems) {
+    throw new CommandRejectedError(
+      `SLOWLOG GET is rejected: ${count} entries exceed maxFetchItems=${instance.maxFetchItems}. ` +
+        'Use a smaller count.',
     );
   }
 }
@@ -732,6 +1150,21 @@ async function guardSetOperation(
       `${args[0]} is rejected: ${keys.length} keys exceed the guard limit of ${MAX_SET_OPERATION_KEYS}. ` +
         'Split the operation or use smaller sets.',
     );
+  }
+
+  const memories = await Promise.all(keys.map((key) => memoryUsage(client, key)));
+  let totalMemory = 0;
+  for (const memory of memories) {
+    if (memory === null) {
+      continue;
+    }
+    totalMemory += memory;
+    if (totalMemory > instance.maxFetchChars) {
+      throw new CommandRejectedError(
+        `${args[0]} is rejected: the input sets use about ${totalMemory} bytes in total ` +
+          `(maxFetchChars=${instance.maxFetchChars}). Use read_page kind="set" or smaller sets.`,
+      );
+    }
   }
 
   const sizes = await Promise.all(keys.map((key) => numberReply(client, 'SCARD', key)));
@@ -774,6 +1207,11 @@ async function numberReply(
     return null;
   } catch (error) {
     const message = errorMessage(error);
+    if (/Command timed out/i.test(message)) {
+      throw new CommandRejectedError(
+        `Cannot verify the size of "${args[0] ?? ''}" because ${command} timed out: ${message}`,
+      );
+    }
     if (/NOPERM|no permissions|permission denied/i.test(message)) {
       throw new CommandRejectedError(
         `Cannot verify the size of "${args[0] ?? ''}" because the Redis user cannot run ${command}: ${message}`,
@@ -790,6 +1228,11 @@ async function typeOf(client: RedisClient, key: string): Promise<string | null> 
     return typeof reply === 'string' ? reply : null;
   } catch (error) {
     const message = errorMessage(error);
+    if (/Command timed out/i.test(message)) {
+      throw new CommandRejectedError(
+        `Cannot verify the type of "${key}" because TYPE timed out: ${message}`,
+      );
+    }
     if (/NOPERM|no permissions|permission denied/i.test(message)) {
       throw new CommandRejectedError(
         `Cannot verify the type of "${key}" because the Redis user cannot run TYPE: ${message}`,
@@ -805,7 +1248,12 @@ async function memoryUsage(client: RedisClient, key: string): Promise<number | n
     return typeof reply === 'number' ? reply : null;
   } catch (error) {
     const message = errorMessage(error);
-    if (/NOPERM|no permissions|permission denied|Command timed out/i.test(message)) {
+    if (/Command timed out/i.test(message)) {
+      throw new CommandRejectedError(
+        `Cannot verify the memory size of "${key}" because MEMORY USAGE timed out: ${message}`,
+      );
+    }
+    if (/NOPERM|no permissions|permission denied/i.test(message)) {
       throw new CommandRejectedError(
         `Cannot verify the memory size of "${key}" because the Redis user cannot run MEMORY USAGE: ${message}`,
       );
