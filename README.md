@@ -579,6 +579,8 @@ npm trust github redis-switchboard-mcp \
 npm trust list redis-switchboard-mcp
 ```
 
+If `npm trust` reports that you must be logged in, run `npm login --auth-type=web` first and complete 2FA.
+
 The workflow already has `permissions: id-token: write`; npm generates provenance automatically, so `--provenance` is not required.
 
 If you prefer a token instead, add an `NPM_TOKEN` repository secret and put

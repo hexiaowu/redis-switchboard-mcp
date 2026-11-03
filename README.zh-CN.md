@@ -580,6 +580,8 @@ npm trust github redis-switchboard-mcp \
 npm trust list redis-switchboard-mcp
 ```
 
+如果 `npm trust` 提示必须先登录，先执行 `npm login --auth-type=web` 完成 2FA。
+
 workflow 已经包含 `permissions: id-token: write`；npm 会自动生成 provenance，不需要额外传 `--provenance`。
 
 如果你更想用 token，可以添加 `NPM_TOKEN` repository secret，并在 publish step 上设置
