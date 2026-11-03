@@ -20,6 +20,10 @@ export const DEFAULT_LIMITS = {
   maxScanIterations: 200,
   scanTimeBudgetMs: 10_000,
   maxConnections: 32,
+  /** Idle connections are closed and evicted after this long without activity. 0 disables. */
+  idleTimeoutMs: 300_000,
+  /** Connections kept warm per (instance, db) before new requests queue behind busy ones. */
+  poolSize: 4,
 } as const;
 
 export interface InstanceConfig {
@@ -52,6 +56,13 @@ export interface InstanceConfig {
   maxScanIterations: number;
   scanTimeBudgetMs: number;
   maxConnections: number;
+  /**
+   * Close a cached (instance, db) connection after this many milliseconds
+   * without any command. 0 keeps connections until the process exits.
+   */
+  idleTimeoutMs: number;
+  /** Connections pooled per (instance, db); extra concurrent calls queue on busy ones. */
+  poolSize: number;
 }
 
 export interface AppConfig {
@@ -99,6 +110,8 @@ const INSTANCE_KEYS = new Set([
   'maxScanIterations',
   'scanTimeBudgetMs',
   'maxConnections',
+  'idleTimeoutMs',
+  'poolSize',
 ]);
 
 const TOP_LEVEL_KEYS = new Set(['instances', 'defaultInstance', '$schema']);
@@ -318,6 +331,8 @@ function buildSingleInstance(cli: CliOptions, env: NodeJS.ProcessEnv): AppConfig
     scanTimeBudgetMs:
       envInt(env, 'REDIS_SCAN_TIME_BUDGET_MS', 100, 300_000) ?? DEFAULT_LIMITS.scanTimeBudgetMs,
     maxConnections: envInt(env, 'REDIS_MAX_CONNECTIONS', 1, 256) ?? DEFAULT_LIMITS.maxConnections,
+    idleTimeoutMs: envInt(env, 'REDIS_IDLE_TIMEOUT_MS', 0, 86_400_000) ?? DEFAULT_LIMITS.idleTimeoutMs,
+    poolSize: envInt(env, 'REDIS_POOL_SIZE', 1, 16) ?? DEFAULT_LIMITS.poolSize,
   };
 
   return { instances: [instance], defaultInstance: instance.name };
@@ -397,6 +412,9 @@ function parseInstance(raw: unknown, context: string, env: NodeJS.ProcessEnv): I
       DEFAULT_LIMITS.scanTimeBudgetMs,
     maxConnections:
       readOptionalInt(object, 'maxConnections', context, 1, 256) ?? DEFAULT_LIMITS.maxConnections,
+    idleTimeoutMs:
+      readOptionalInt(object, 'idleTimeoutMs', context, 0, 86_400_000) ?? DEFAULT_LIMITS.idleTimeoutMs,
+    poolSize: readOptionalInt(object, 'poolSize', context, 1, 16) ?? DEFAULT_LIMITS.poolSize,
   };
 }
 

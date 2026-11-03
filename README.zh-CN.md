@@ -43,7 +43,7 @@ Redis 的 `SELECT` 改变的是**连接**的数据库，而不是某一条命令
 - **抓取守卫**：`execute` 对无界 `GET`/`MGET`/`HMGET`、`LRANGE 0 -1`、`HGETALL`/`HKEYS`/`HVALS`、`SMEMBERS`、`ZRANGE 0 -1`、`ZUNION`/`ZINTER`/`ZDIFF`、无 `COUNT` 的 `XRANGE`、超大 `HSCAN`/`SSCAN`/`ZSCAN` `COUNT`、无 `LIMIT` 的 `SORT_RO`、负数随机 count、过大的集合运算等，在命令执行前直接拒绝，并提示使用 `read_page`。
 - **有界 SCAN**：`limit`、迭代次数上限、墙钟时间预算。
 - **集群检测**：Redis Cluster 只允许 db 0。
-- **连接数上限**：每个实例 `maxConnections`，默认 32。
+- **连接数上限**：每个实例 `maxConnections`，默认 32；每个 `(instance, db)` 维持一个小连接池（`poolSize`，默认 4），并支持**空闲连接回收**（`idleTimeoutMs`，默认 5 分钟）：连续 5 分钟没有任何命令的连接会被关闭并从缓存移除，不再占用的库不会白白持有连接。
 - **凭证脱敏**：错误信息中移除 URL / password / AUTH 凭据。
 - **不向 stdout 打日志**：stdout 专用于 MCP stdio 传输。
 
@@ -180,6 +180,8 @@ node dist/index.js
 | `REDIS_ALLOWED_DBS` | ⚪ 可选 | — | 逗号分隔的库白名单，例如 `0,2,4` |
 | `REDIS_ALLOW_SCRIPTING` | ⚪ 可选 | `false` | 允许 `EVAL` / `EVALSHA` / `FCALL`（见安全说明） |
 | `REDIS_MAX_CONNECTIONS` | ⚪ 可选 | `32` | 每个实例的连接缓存上限（1-256） |
+| `REDIS_POOL_SIZE` | ⚪ 可选 | `4` | 每个 `(instance, db)` 的连接池大小（1-16） |
+| `REDIS_IDLE_TIMEOUT_MS` | ⚪ 可选 | `300000` | `(instance, db)` 连接空闲超过该时长后自动关闭；`0` 表示禁用 |
 | `REDIS_CONNECT_TIMEOUT_MS` | ⚪ 可选 | `5000` | TCP / 建连超时 |
 | `REDIS_COMMAND_TIMEOUT_MS` | ⚪ 可选 | `15000` | 单条命令超时；`0` 表示禁用 |
 | `REDIS_MAX_RESULT_ITEMS` | ⚪ 可选 | `200` | 回复中单个数组 / 对象的 item 上限 |
@@ -265,6 +267,8 @@ JSON 配置和 `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` 是**互斥**的：同时�
 | `allowScripting` | ⚪ 可选 | `false` | 允许 `EVAL` / `EVALSHA` / `FCALL` |
 | `allowedDbs` | ⚪ 可选 | — | 限制该实例可访问的逻辑库 |
 | `maxConnections` | ⚪ 可选 | `32` | `(instance, db)` 连接缓存上限 |
+| `poolSize` | ⚪ 可选 | `4` | 每个 `(instance, db)` 的连接池大小（1-16） |
+| `idleTimeoutMs` | ⚪ 可选 | `300000` | `(instance, db)` 连接空闲超过该时长后自动关闭；`0` 表示禁用 |
 | `connectTimeoutMs` | ⚪ 可选 | `5000` | 建连超时 |
 | `commandTimeoutMs` | ⚪ 可选 | `15000` | 单条命令超时；`0` 表示禁用 |
 | `maxResultItems` | ⚪ 可选 | `200` | 单容器 item 上限 |
@@ -512,7 +516,7 @@ JSON 里写 `"mode": "readonly"` / `"mode": "readwrite"`；单实例环境变量
 - **抓取守卫覆盖范围**：已覆盖 `GET`/`MGET`/`GETDEL`/`GETEX`/`GETSET`、`GETRANGE`/`SUBSTR`、`HGET`、`DUMP`、`LRANGE`、`HGETALL`/`HKEYS`/`HVALS`、`SMEMBERS`、`SINTER`/`SUNION`/`SDIFF`、`ZRANGE`/`ZRANGEBY*`/`ZUNION`/`ZINTER`/`ZDIFF`、`XRANGE`/`XREVRANGE`、`HSCAN`/`SSCAN`/`ZSCAN` 的 `COUNT`、`SORT`/`SORT_RO`、`LCS`、`GEOSEARCH`/`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`、随机成员和 pop count。它**不是穷尽式**的：`LINDEX`、`XPENDING`、`XINFO STREAM ... FULL`、`SET ... GET`、`LMPOP`/`ZMPOP` 未被守卫；只按 item 数检查的命令也不会限制单个字段/成员的字节大小。这些场景请配合受限 ACL、`commandTimeoutMs` 和尽可能小的命令使用。
 - **大读取**：`execute` 会拒绝常见的无界批量读取形式，`read_page` 提供真正的服务端分页。对于守卫未覆盖的特殊命令，Redis/ioredis 仍可能在 `truncateReply` 之前完整物化回复。大集合优先用 `key_info`、`read_page`、`scan_keys`，并配合 ACL / `commandTimeoutMs`。
 - **SCAN 一致性**：SCAN 是增量扫描，不是快照；结果可能遗漏或重复。
-- **连接缓存**：每个 `(instance, db)` 一条连接，默认每个实例最多 32 条。达到上限后是硬性错误，不会驱逐空闲连接；如果长期使用很多逻辑库，请提高 `maxConnections` 或重启进程。
+- **连接缓存**：每个 `(instance, db)` 最多保留 `poolSize`（默认 4）条连接；每个实例的总量由 `maxConnections`（默认 32）硬性限制。空闲超过 `idleTimeoutMs`（默认 5 分钟）的连接会自动关闭；发生命令超时的连接会被立即丢弃并在下次请求时重建。如果长期使用很多逻辑库，请提高 `maxConnections`。
 - **集群 + ACL**：如果 ACL 拒绝 `INFO cluster`，显式 `SELECT` 验证仍会以清晰错误拒绝集群上的 db > 0；db 0 不需要 `SELECT`。
 
 ---

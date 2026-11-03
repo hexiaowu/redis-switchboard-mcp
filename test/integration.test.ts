@@ -326,8 +326,12 @@ test('a reconnect re-selects the target database before commands run', async () 
 
     server.dropConnections();
 
+    // Tool handlers always resolve a client through getClient, so assert the
+    // recovery through the same path (a connection poisoned by a command
+    // timeout during the drop is evicted and replaced).
     await waitFor(async () => {
-      assert.equal(await client.call('GET', 'key'), 'three');
+      const reconnected = await manager.getClient(instance, 3);
+      assert.equal(await reconnected.call('GET', 'key'), 'three');
     });
 
     const selectsForDb3 = server.selectedDbs.filter((db) => db === 3);

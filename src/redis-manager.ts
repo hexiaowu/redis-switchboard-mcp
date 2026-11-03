@@ -8,6 +8,8 @@ import { MAX_DB_INDEX, type AppConfig, type InstanceConfig } from './config.js';
  */
 export interface RedisClient {
   call(command: string, ...args: (string | number | Buffer)[]): Promise<unknown>;
+  /** Like call(), but the reply is returned as a raw Buffer (no UTF-8 decoding). */
+  callBuffer(command: string, ...args: (string | number | Buffer)[]): Promise<Buffer>;
   scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]>;
   type(key: string): Promise<string>;
   pttl(key: string): Promise<number>;
@@ -21,6 +23,14 @@ export interface RedisClient {
 
 interface ManagedRedisClient extends RedisClient {
   shutdown(): Promise<void>;
+  /** Commands currently in flight; idle eviction waits for this to reach 0. */
+  readonly pendingCommands: number;
+  /** Timestamp of the last command start/finish; used by idle eviction. */
+  readonly lastUsedAt: number;
+  /** True once the underlying connection has ended and will not reconnect. */
+  isClosed(): boolean;
+  /** Mark the client as recycled; further commands fail fast. */
+  retire(): void;
 }
 
 export interface RedisProvider {
@@ -28,6 +38,8 @@ export interface RedisProvider {
   resolveDb(instance: InstanceConfig, db?: number): number;
   getClient(instance: InstanceConfig, db: number): Promise<RedisClient>;
 }
+
+const COMMAND_TIMEOUT_PATTERN = /Command timed out/i;
 
 /**
  * A connection wrapper that guarantees the logical database before any command
@@ -49,6 +61,9 @@ class VerifiedClient implements ManagedRedisClient {
   private verified = false;
   private verification: Promise<void> | undefined;
   private generation = 0;
+  private inFlight = 0;
+  private lastUsed = Date.now();
+  private retired = false;
 
   constructor(raw: Redis, instance: InstanceConfig, db: number, onInvalid: () => void) {
     this.raw = raw;
@@ -71,62 +86,71 @@ class VerifiedClient implements ManagedRedisClient {
     });
   }
 
+  get pendingCommands(): number {
+    return this.inFlight;
+  }
+
+  get lastUsedAt(): number {
+    return this.lastUsed;
+  }
+
+  isClosed(): boolean {
+    return this.raw.status === 'end';
+  }
+
+  retire(): void {
+    this.retired = true;
+  }
+
   async waitUntilVerified(): Promise<void> {
     await this.ensureVerified();
   }
 
   async call(command: string, ...args: (string | number | Buffer)[]): Promise<unknown> {
-    const client = await this.ensureVerified();
-    return client.call(command, ...args);
+    return this.run((client) => client.call(command, ...args));
+  }
+
+  async callBuffer(command: string, ...args: (string | number | Buffer)[]): Promise<Buffer> {
+    return (await this.run((client) => client.callBuffer(command, ...args))) as Buffer;
   }
 
   async scan(
     cursor: string | number,
     ...args: (string | number)[]
   ): Promise<[string, string[]]> {
-    const client = await this.ensureVerified();
-    const reply = await client.call('SCAN', cursor, ...args);
-    return reply as [string, string[]];
+    return this.run(async (client) => (await client.call('SCAN', cursor, ...args)) as [string, string[]]);
   }
 
   async type(key: string): Promise<string> {
-    const client = await this.ensureVerified();
-    return client.type(key);
+    return this.run((client) => client.type(key));
   }
 
   async pttl(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.pttl(key);
+    return this.run((client) => client.pttl(key));
   }
 
   async strlen(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.strlen(key);
+    return this.run((client) => client.strlen(key));
   }
 
   async llen(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.llen(key);
+    return this.run((client) => client.llen(key));
   }
 
   async hlen(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.hlen(key);
+    return this.run((client) => client.hlen(key));
   }
 
   async scard(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.scard(key);
+    return this.run((client) => client.scard(key));
   }
 
   async zcard(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.zcard(key);
+    return this.run((client) => client.zcard(key));
   }
 
   async xlen(key: string): Promise<number> {
-    const client = await this.ensureVerified();
-    return client.xlen(key);
+    return this.run((client) => client.xlen(key));
   }
 
   async shutdown(): Promise<void> {
@@ -142,6 +166,43 @@ class VerifiedClient implements ManagedRedisClient {
         clearTimeout(timer);
       }
       this.raw.disconnect();
+    }
+  }
+
+  /**
+   * Run one command on the verified connection.
+   *
+   * A command timeout only rejects the promise; ioredis keeps the command in
+   * its queue. If the reply is later lost on a still-open socket, every
+   * following reply would be delivered to the previous (timed-out) command.
+   * A timeout therefore poisons the connection: drop the socket and evict the
+   * client so the next request reconnects from scratch.
+   */
+  private async run<T>(command: (client: Redis) => Promise<T>): Promise<T> {
+    if (this.retired) {
+      throw new AppError(
+        'CONNECTION_ERROR',
+        `[${this.instance.name}] connection was recycled (idle timeout or command timeout); retry the request.`,
+      );
+    }
+
+    this.inFlight += 1;
+    this.lastUsed = Date.now();
+    try {
+      const client = await this.ensureVerified();
+      return await command(client);
+    } catch (error) {
+      if (error instanceof Error && COMMAND_TIMEOUT_PATTERN.test(error.message)) {
+        // Retire first so concurrent holders of this reference fail fast
+        // instead of running on a desynced reply queue.
+        this.retired = true;
+        this.raw.disconnect();
+        this.onInvalid();
+      }
+      throw error;
+    } finally {
+      this.inFlight -= 1;
+      this.lastUsed = Date.now();
     }
   }
 
@@ -166,7 +227,12 @@ class VerifiedClient implements ManagedRedisClient {
     if (this.db === 0) {
       // Redis connections start on db 0, so no SELECT is needed. Avoiding the
       // round trip also keeps restricted ACL users that lack +select working
-      // for the default database.
+      // for the default database. Still wait for the transport to be ready, so
+      // that db 0 behaves like db > 0 across reconnects instead of failing
+      // with "Stream isn't writeable" while ioredis is reconnecting.
+      if (this.raw.status !== 'ready') {
+        await this.waitForReady();
+      }
       if (generation === this.generation) {
         this.verified = true;
       }
@@ -338,14 +404,40 @@ class VerifiedClient implements ManagedRedisClient {
 }
 
 /**
- * One client per (instance, logical database). The cache stores the connection
- * promise so concurrent first-use calls share one client.
+ * Cached connections for one (instance, logical database). Holds up to
+ * `poolSize` warm connections so concurrent requests do not all queue behind a
+ * single socket; the round-robin index spreads new requests across them.
+ */
+interface ClientPool {
+  readonly instance: InstanceConfig;
+  readonly db: number;
+  readonly promises: Promise<ManagedRedisClient>[];
+  roundRobin: number;
+}
+
+/**
+ * One client per (instance, logical database), pooled up to `poolSize`.
+ * The cache stores connection promises so concurrent first-use calls share one
+ * client. Connections idle for longer than `idleTimeoutMs` are closed and
+ * evicted so unused databases stop holding server resources.
  */
 export class RedisManager implements RedisProvider {
-  private readonly clients = new Map<string, Promise<ManagedRedisClient>>();
+  private readonly pools = new Map<string, ClientPool>();
   private readonly clusterFlags = new Map<string, Promise<boolean>>();
+  private readonly sweepTimer: NodeJS.Timeout | undefined;
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(private readonly config: AppConfig) {
+    const idleTimeouts = config.instances
+      .map((instance) => instance.idleTimeoutMs)
+      .filter((value) => value > 0);
+    if (idleTimeouts.length > 0) {
+      const shortest = Math.min(...idleTimeouts);
+      const interval = Math.min(60_000, Math.max(1_000, shortest / 4));
+      this.sweepTimer = setInterval(() => this.sweepIdleClients(), interval);
+      // Never keep the process alive just for the sweep.
+      this.sweepTimer.unref();
+    }
+  }
 
   resolveInstance(name?: string): InstanceConfig {
     return resolveInstanceByName(this.config, name);
@@ -359,38 +451,55 @@ export class RedisManager implements RedisProvider {
     const resolvedDb = resolveDbIndex(instance, db);
     const key = `${instance.name}\u0000${resolvedDb}`;
 
-    const existing = this.clients.get(key);
-    if (existing !== undefined) {
-      return existing;
+    let pool = this.pools.get(key);
+    if (pool === undefined) {
+      pool = { instance, db: resolvedDb, promises: [], roundRobin: 0 };
+      this.pools.set(key, pool);
     }
 
-    const connectionCount = this.countClients(instance.name);
-    if (connectionCount >= instance.maxConnections) {
-      throw new AppError(
-        'DB_ERROR',
-        `Instance "${instance.name}" already has ${connectionCount} open database connections ` +
-          `(maxConnections=${instance.maxConnections}). Reuse an existing database or raise the limit.`,
-      );
-    }
+    if (pool.promises.length > 0) {
+      const index = pool.roundRobin % pool.promises.length;
+      pool.roundRobin += 1;
+      const promise = pool.promises[index]!;
 
-    let promise: Promise<ManagedRedisClient> | undefined;
-    const evictIfCurrent = (): void => {
-      if (promise !== undefined && this.clients.get(key) === promise) {
-        this.clients.delete(key);
+      let client: ManagedRedisClient;
+      try {
+        client = await promise;
+      } catch (error) {
+        this.removeFromPool(key, pool, promise);
+        throw error;
       }
-    };
 
-    promise = this.createAndConnect(instance, resolvedDb, evictIfCurrent).catch((error: unknown) => {
-      evictIfCurrent();
-      throw error;
-    });
-    this.clients.set(key, promise);
-    return promise;
+      // Grow the pool only under concurrency: when every pooled connection is
+      // busy, add one more (up to poolSize) instead of queueing behind a
+      // single socket. Sequential requests keep reusing one connection.
+      if (client.pendingCommands > 0 && pool.promises.length < instance.poolSize) {
+        const created = this.addClientToPool(key, pool, resolvedDb);
+        if (created !== undefined) {
+          return created;
+        }
+      }
+      return client;
+    }
+
+    const created = this.addClientToPool(key, pool, resolvedDb);
+    if (created !== undefined) {
+      return created;
+    }
+
+    throw new AppError(
+      'DB_ERROR',
+      `Instance "${instance.name}" already has ${this.countClients(instance.name)} open database connections ` +
+        `(maxConnections=${instance.maxConnections}). Reuse an existing database or raise the limit.`,
+    );
   }
 
   async close(): Promise<void> {
-    const pending = [...this.clients.values()];
-    this.clients.clear();
+    if (this.sweepTimer !== undefined) {
+      clearInterval(this.sweepTimer);
+    }
+    const pending = [...this.pools.values()].flatMap((pool) => [...pool.promises]);
+    this.pools.clear();
     this.clusterFlags.clear();
 
     await Promise.allSettled(
@@ -403,15 +512,98 @@ export class RedisManager implements RedisProvider {
     );
   }
 
+  private addClientToPool(
+    key: string,
+    pool: ClientPool,
+    db: number,
+  ): Promise<ManagedRedisClient> | undefined {
+    if (this.countClients(pool.instance.name) >= pool.instance.maxConnections) {
+      return undefined;
+    }
+
+    let promise: Promise<ManagedRedisClient> | undefined;
+    const removeFromPool = (): void => {
+      if (promise !== undefined) {
+        this.removeFromPool(key, pool, promise);
+      }
+    };
+
+    promise = this.createAndConnect(pool.instance, db, removeFromPool).catch((error: unknown) => {
+      removeFromPool();
+      throw error;
+    });
+    pool.promises.push(promise);
+    return promise;
+  }
+
+  private removeFromPool(key: string, pool: ClientPool, promise: Promise<ManagedRedisClient>): void {
+    const index = pool.promises.indexOf(promise);
+    if (index !== -1) {
+      pool.promises.splice(index, 1);
+    }
+    if (pool.promises.length === 0 && this.pools.get(key) === pool) {
+      this.pools.delete(key);
+    }
+  }
+
   private countClients(instanceName: string): number {
     const prefix = `${instanceName}\u0000`;
     let count = 0;
-    for (const key of this.clients.keys()) {
+    for (const [key, pool] of this.pools) {
       if (key.startsWith(prefix)) {
-        count += 1;
+        count += pool.promises.length;
       }
     }
     return count;
+  }
+
+  /**
+   * Close (instance, db) connections that have had no command for
+   * `idleTimeoutMs`, and drop connections that ended without reconnecting.
+   * A connection is only recycled when no command is in flight.
+   */
+  private readonly sweepIdleClients = (): void => {
+    const now = Date.now();
+    for (const [key, pool] of [...this.pools]) {
+      for (const promise of [...pool.promises]) {
+        void this.evictIfIdle(key, pool, promise, now);
+      }
+      if (pool.promises.length === 0 && this.pools.get(key) === pool) {
+        this.pools.delete(key);
+      }
+    }
+  };
+
+  private async evictIfIdle(
+    key: string,
+    pool: ClientPool,
+    promise: Promise<ManagedRedisClient>,
+    now: number,
+  ): Promise<void> {
+    let client: ManagedRedisClient;
+    try {
+      client = await promise;
+    } catch {
+      // A failed connection promise lingers until a getClient call hits it;
+      // sweep it so the pool does not keep dead entries.
+      this.removeFromPool(key, pool, promise);
+      return;
+    }
+
+    // Read the state once; the checks below run synchronously, so a command
+    // that starts after this point re-increments pendingCommands before any
+    // teardown can happen (single-threaded event loop).
+    const idleTimeoutMs = pool.instance.idleTimeoutMs;
+    const idleFor = now - client.lastUsedAt;
+    const isIdle = client.pendingCommands === 0 && idleFor >= idleTimeoutMs;
+    const isDead = client.isClosed() && client.pendingCommands === 0;
+    if (!isIdle && !isDead) {
+      return;
+    }
+
+    this.removeFromPool(key, pool, promise);
+    client.retire();
+    void client.shutdown().catch(() => undefined);
   }
 
   private async createAndConnect(
@@ -425,6 +617,20 @@ export class RedisManager implements RedisProvider {
     }
 
     const client = new Redis(buildRedisOptions(instance));
+    // ioredis re-issues SELECT fire-and-forget on every reconnect (its
+    // event handler calls select() without awaiting). If that SELECT fails
+    // (for example +select revoked after a failover), the rejection would be
+    // unobserved and terminate the process under Node's default unhandled
+    // rejection policy. Shadow select() so every promise it returns carries a
+    // no-op catch handler; the original promise is still returned, so callers
+    // (including the VerifiedClient verification below) still observe failures.
+    const nativeSelect = client.select.bind(client) as (db: number) => Promise<unknown>;
+    client.select = ((db: number) => {
+      const promise = nativeSelect(db);
+      promise.catch(() => undefined);
+      return promise;
+    }) as unknown as typeof client.select;
+
     // ioredis emits 'error' for background reconnects. Without a listener, an
     // EventEmitter 'error' would crash the process. Command failures are
     // reported through the command promises instead.
@@ -583,7 +789,11 @@ function buildRedisOptions(instance: InstanceConfig): RedisOptions {
           blockingTimeout: instance.commandTimeoutMs,
           socketTimeout: instance.commandTimeoutMs + 5_000,
         }
-      : {}),
+      : // Keep a socket-level timeout even when the command timeout is
+        // disabled: ioredis only arms it while a reply is pending, so idle
+        // connections are unaffected, but a half-open connection now recovers
+        // instead of hanging every later command forever.
+        { socketTimeout: 60_000 }),
     enableOfflineQueue: false,
     // Do not resend commands that were in flight when the socket dropped; a
     // non-idempotent command must not be applied twice after a reconnect.

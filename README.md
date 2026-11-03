@@ -43,7 +43,7 @@ The result is stateless from the caller's point of view: `execute` in db 2 and d
 - **Fetch guards** in `execute`: unbounded `GET`/`MGET`/`HMGET`, `LRANGE 0 -1`, `HGETALL`/`HKEYS`/`HVALS`, `SMEMBERS`, `ZRANGE 0 -1`, `ZUNION`/`ZINTER`/`ZDIFF`, `XRANGE` without `COUNT`, huge `HSCAN`/`SSCAN`/`ZSCAN` `COUNT`, `SORT_RO` without `LIMIT`, negative random counts and oversized set operations are rejected with a pointer to `read_page`.
 - **Bounded scans** with `limit`, SCAN iteration cap, and a wall-clock budget.
 - **Cluster detection** — logical DBs other than 0 are rejected on a Redis Cluster.
-- **Connection cache limit** per instance (`maxConnections`, default 32).
+- **Connection cache limit** per instance (`maxConnections`, default 32), with a small pool per `(instance, db)` (`poolSize`, default 4) and **idle connection recycling** (`idleTimeoutMs`, default 5 minutes): a connection that has not run any command for 5 minutes is closed and evicted, so databases you stop using stop holding server resources.
 - **Credential redaction** in error messages.
 - **No stdout logging** — stdout is reserved for the MCP stdio transport.
 
@@ -178,6 +178,8 @@ The same file can be selected with `REDIS_MCP_CONFIG=/path/to/config.json`.
 | `REDIS_ALLOWED_DBS` | ⚪ Optional | — | Comma-separated allowlist, e.g. `0,2,4` |
 | `REDIS_ALLOW_SCRIPTING` | ⚪ Optional | `false` | Allow `EVAL`/`EVALSHA`/`FCALL` (see security caveat) |
 | `REDIS_MAX_CONNECTIONS` | ⚪ Optional | `32` | Per-instance connection cache limit (1-256) |
+| `REDIS_POOL_SIZE` | ⚪ Optional | `4` | Connections pooled per `(instance, db)` (1-16) |
+| `REDIS_IDLE_TIMEOUT_MS` | ⚪ Optional | `300000` | Close an idle `(instance, db)` connection after this long without a command; `0` disables |
 | `REDIS_CONNECT_TIMEOUT_MS` | ⚪ Optional | `5000` | TCP/connect timeout |
 | `REDIS_COMMAND_TIMEOUT_MS` | ⚪ Optional | `15000` | Per-command timeout; `0` disables it |
 | `REDIS_MAX_RESULT_ITEMS` | ⚪ Optional | `200` | Per-array/object item cap in replies |
@@ -263,6 +265,8 @@ JSON config and `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` are **mutually exclusive*
 | `allowScripting` | ⚪ Optional | `false` | Allow `EVAL`/`EVALSHA`/`FCALL` |
 | `allowedDbs` | ⚪ Optional | — | Restrict which logical DBs this instance may access |
 | `maxConnections` | ⚪ Optional | `32` | Cache limit for `(instance, db)` connections |
+| `poolSize` | ⚪ Optional | `4` | Connections pooled per `(instance, db)` (1-16) |
+| `idleTimeoutMs` | ⚪ Optional | `300000` | Close an idle `(instance, db)` connection after this long without a command; `0` disables |
 | `connectTimeoutMs` | ⚪ Optional | `5000` | TCP/connect timeout |
 | `commandTimeoutMs` | ⚪ Optional | `15000` | Per-command timeout; `0` disables |
 | `maxResultItems` | ⚪ Optional | `200` | Per-container item cap |
@@ -511,7 +515,7 @@ This package exposes a **stdio** MCP server. It does not open an HTTP port and d
 - **Fetch guard coverage**: covered forms include `GET`/`MGET`/`GETDEL`/`GETEX`/`GETSET`, `GETRANGE`/`SUBSTR`, `HGET`, `DUMP`, `LRANGE`, `HGETALL`/`HKEYS`/`HVALS`, `SMEMBERS`, `SINTER`/`SUNION`/`SDIFF`, `ZRANGE`/`ZRANGEBY*`/`ZUNION`/`ZINTER`/`ZDIFF`, `XRANGE`/`XREVRANGE`, `HSCAN`/`SSCAN`/`ZSCAN` `COUNT`, `SORT`/`SORT_RO`, `LCS`, `GEOSEARCH`/`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`, random members and pop counts. It is **not exhaustive**: `LINDEX`, `XPENDING`, `XINFO STREAM ... FULL`, `SET ... GET`, `LMPOP`/`ZMPOP` are not guarded, and item-count-only checks do not bound the byte size of an individual field/member. For those, use a restricted ACL, `commandTimeoutMs`, and the smallest possible command.
 - **Large reads**: `execute` rejects the common unbounded bulk-read forms and `read_page` provides server-side paging. A command that is not covered by the guard (for example an unusual command with a large reply) can still be fully materialized by Redis/ioredis before `truncateReply` runs. Prefer `key_info` for metadata, `scan_keys` for key enumeration, `read_page` for collections, and a restricted ACL / `commandTimeoutMs` for very large data.
 - **SCAN consistency**: SCAN is incremental and not a snapshot; results can be missed or duplicated across calls.
-- **Connection cache**: each `(instance, db)` pair uses one connection. The default cap is 32 per instance. The cap is a hard stop with no eviction: once 32 distinct databases have been opened, other databases are unavailable until the process restarts. Raise `maxConnections` if you legitimately use many logical DBs.
+- **Connection cache**: each `(instance, db)` pair keeps up to `poolSize` (default 4) pooled connections. The per-instance cap is `maxConnections` (default 32) and is a hard stop. Connections idle for longer than `idleTimeoutMs` (default 5 minutes) are closed automatically; a connection with a command that timed out is dropped immediately and replaced on the next request. Raise `maxConnections` if you legitimately use many logical DBs.
 - **Cluster + ACL**: if `INFO cluster` is denied by ACL, the explicit `SELECT` verification still rejects db > 0 on a cluster with a clear error. db 0 does not require `SELECT`.
 
 ---

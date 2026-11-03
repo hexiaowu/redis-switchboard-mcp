@@ -63,6 +63,13 @@ async function main(): Promise<void> {
   process.stdin.once('end', () => {
     void shutdown();
   });
+
+  // Background reconnects can produce rejections nobody observes (for example
+  // ioredis re-issuing SELECT after a failover). Keep serving instead of
+  // letting Node's default unhandled-rejection policy kill the process.
+  process.on('unhandledRejection', (reason: unknown) => {
+    process.stderr.write(`[redis-switchboard-mcp] unhandled rejection: ${errorMessage(reason)}\n`);
+  });
 }
 
 function printHelp(version: string): void {
@@ -92,6 +99,8 @@ function printHelp(version: string): void {
       '  REDIS_ALLOWED_DBS                Comma-separated allowlist, e.g. "0,2,4"',
       '  REDIS_ALLOW_SCRIPTING            "1" to allow EVAL/EVALSHA/FCALL',
       '  REDIS_MAX_CONNECTIONS            Per-instance connection cache limit (default: 32)',
+      '  REDIS_POOL_SIZE                  Connections pooled per (instance, db) (default: 4)',
+      '  REDIS_IDLE_TIMEOUT_MS            Close idle (instance, db) connections after this long; 0 disables (default: 300000)',
       '  REDIS_CONNECT_TIMEOUT_MS         TCP/connect timeout (default: 5000)',
       '  REDIS_COMMAND_TIMEOUT_MS         Command timeout, 0 disables (default: 15000)',
       '  REDIS_MAX_RESULT_ITEMS           Per-container item cap (default: 200)',

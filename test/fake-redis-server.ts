@@ -8,6 +8,10 @@ export interface FakeRedisServerOptions {
   denySelect?: boolean;
   /** When set, SCAN returns at most this many keys per call and uses cursors. */
   scanPageSize?: number;
+  /** Commands that are accepted but never answered (simulates a lost reply). */
+  hangCommands?: string[];
+  /** Reply delay in ms per command name. */
+  commandDelaysMs?: Record<string, number>;
 }
 
 interface ParsedCommand {
@@ -32,10 +36,19 @@ export class FakeRedisServer {
 
   port = 0;
 
+  /** Currently open client sockets. */
+  connectionCount = 0;
+  /** Cumulative number of sockets ever accepted. */
+  totalConnections = 0;
+  /** When true, SELECT replies NOPERM (used to simulate a revoked +select after failover). */
+  failSelect = false;
+
   private readonly clusterEnabled: boolean;
   private readonly maxDatabases: number;
   private readonly denySelect: boolean;
   private readonly scanPageSize: number | undefined;
+  private readonly hangCommands: Set<string>;
+  private readonly commandDelaysMs: Record<string, number>;
   private readonly server: Server;
   private readonly sockets = new Set<Socket>();
   private readonly socketDbs = new Map<Socket, number>();
@@ -45,6 +58,8 @@ export class FakeRedisServer {
     this.maxDatabases = options.maxDatabases ?? 16;
     this.denySelect = options.denySelect ?? false;
     this.scanPageSize = options.scanPageSize;
+    this.hangCommands = new Set(options.hangCommands ?? []);
+    this.commandDelaysMs = options.commandDelaysMs ?? {};
     this.server = createServer((socket) => this.handle(socket));
   }
 
@@ -101,6 +116,8 @@ export class FakeRedisServer {
   private handle(socket: Socket): void {
     this.sockets.add(socket);
     this.socketDbs.set(socket, 0);
+    this.connectionCount += 1;
+    this.totalConnections += 1;
 
     let buffer = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
@@ -129,10 +146,25 @@ export class FakeRedisServer {
     socket.on('close', () => {
       this.sockets.delete(socket);
       this.socketDbs.delete(socket);
+      this.connectionCount -= 1;
     });
   }
 
   private dispatch(socket: Socket, args: string[]): void {
+    const command = args[0]!.toUpperCase();
+
+    if (this.hangCommands.has(command)) {
+      return;
+    }
+    const delay = this.commandDelaysMs[command];
+    if (delay !== undefined) {
+      setTimeout(() => this.dispatchNow(socket, args), delay);
+      return;
+    }
+    this.dispatchNow(socket, args);
+  }
+
+  private dispatchNow(socket: Socket, args: string[]): void {
     const command = args[0]!.toUpperCase();
     const db = this.socketDbs.get(socket) ?? 0;
     const data = this.dbMap(db);
@@ -146,6 +178,10 @@ export class FakeRedisServer {
         socket.write('+OK\r\n');
         return;
       case 'SELECT': {
+        if (this.failSelect) {
+          socket.write("-NOPERM this user has no permissions to run the 'select' command\r\n");
+          return;
+        }
         if (this.clusterEnabled) {
           socket.write('-ERR SELECT is not allowed in cluster mode\r\n');
           return;
