@@ -61,6 +61,8 @@ Redis 的 `SELECT` 改变的是**连接**的数据库，而不是某一条命令
 
 ### 从 npm 安装
 
+> 目前尚未发布到 npm。请先使用下面的源码安装方式。
+
 ```bash
 npm install -g redis-switchboard-mcp
 rsm --help

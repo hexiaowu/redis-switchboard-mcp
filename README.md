@@ -61,6 +61,8 @@ The result is stateless from the caller's point of view: `execute` in db 2 and d
 
 ### From npm
 
+> The npm package is not published yet. Use the source install below for now.
+
 ```bash
 npm install -g redis-switchboard-mcp
 rsm --help
