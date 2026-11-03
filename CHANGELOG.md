@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.1] - 2026-11-03
+
+- Fix the npm README, which incorrectly said the package was not published. No runtime changes.
+
 ## [0.1.0] - 2026-11-03
 
 First public release.
