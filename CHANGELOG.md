@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4] - 2026-11-04
+
+- Release automation verification: first version published through npm Trusted Publishing
+  (GitHub OIDC) via the release-triggered `Publish npm` workflow. No runtime changes since
+  0.1.3.
+
 ## [0.1.3] - 2026-11-03
 
 - Harden `normalizeCommand`: a command string whose whole payload is a JSON-serialized argument
