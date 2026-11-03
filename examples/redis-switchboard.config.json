@@ -1,0 +1,28 @@
+{
+  "defaultInstance": "cache-dev",
+  "instances": [
+    {
+      "name": "cache-dev",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "db": 0,
+      "mode": "readwrite",
+      "allowedDbs": [0, 2, 4],
+      "maxConnections": 32
+    },
+    {
+      "name": "cache-prod",
+      "host": "redis.prod.internal",
+      "port": 6380,
+      "username": "app",
+      "passwordEnv": "PROD_REDIS_PASSWORD",
+      "tls": true,
+      "db": 0,
+      "mode": "readonly",
+      "allowedDbs": [0],
+      "commandTimeoutMs": 10000,
+      "maxResultItems": 100,
+      "maxResultChars": 2000
+    }
+  ]
+}

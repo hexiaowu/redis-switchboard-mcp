@@ -1,0 +1,67 @@
+{
+  "name": "redis-switchboard-mcp",
+  "version": "0.1.0",
+  "description": "A Redis MCP server that switches logical databases per request instead of relying on the connection-level SELECT command.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "redis",
+    "database",
+    "ai",
+    "llm"
+  ],
+  "license": "MIT",
+  "author": "hexiaowu",
+  "type": "module",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "default": "./dist/lib.js"
+    }
+  },
+  "bin": {
+    "rsm": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hexiaowu/redis-switchboard-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hexiaowu/redis-switchboard-mcp/issues"
+  },
+  "homepage": "https://github.com/hexiaowu/redis-switchboard-mcp#readme",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "check": "npm run typecheck && npm run typecheck:test && npm test",
+    "prepublishOnly": "npm run typecheck && npm run typecheck:test && npm run build && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ioredis": "^5.11.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
