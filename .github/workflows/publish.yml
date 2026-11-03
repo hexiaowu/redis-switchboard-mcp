@@ -47,6 +47,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check whether this version is already on npm
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if npm view "redis-switchboard-mcp@${VERSION}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "redis-switchboard-mcp@${VERSION} is already published; skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "redis-switchboard-mcp@${VERSION} is not published yet."
+          fi
+
       # Trusted Publishing uses GitHub OIDC, so no NPM_TOKEN is needed.
       # Configure it once on npm:
       #   Package settings -> Trusted Publisher -> GitHub Actions
@@ -58,4 +71,5 @@ jobs:
       # prepublishOnly runs typecheck, test typecheck, build and the full test
       # suite. If any of them fail, npm publish stops before uploading.
       - name: Publish to npm
+        if: steps.published.outputs.exists == 'false'
         run: npm publish --access public
