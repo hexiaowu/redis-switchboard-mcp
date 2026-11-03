@@ -571,7 +571,7 @@ test/               单元、集成和 MCP 握手测试
 如果网页没有显示添加按钮，可以用 npm CLI（npm 11.15+）：
 
 ```bash
-npm install -g npm@latest
+npm install -g npm@11
 npm trust github redis-switchboard-mcp \
   --file publish.yml \
   --repo hexiaowu/redis-switchboard-mcp \

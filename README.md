@@ -570,7 +570,7 @@ Publishing is automated by [`.github/workflows/publish.yml`](.github/workflows/p
 If the website does not show the add control, use the npm CLI (npm 11.15+):
 
 ```bash
-npm install -g npm@latest
+npm install -g npm@11
 npm trust github redis-switchboard-mcp \
   --file publish.yml \
   --repo hexiaowu/redis-switchboard-mcp \
