@@ -35,7 +35,7 @@ The result is stateless from the caller's point of view: `execute` in db 2 and d
 
 - **Per-call database selection** for every tool (`db: 0-255`).
 - **Multiple Redis instances** from a JSON config, selected with the `instance` argument.
-- **Explicit permission mode** (`readonly` / `readwrite`); `readonly` uses an explicit read-command whitelist.
+- **Explicit permission mode** (`readonly` / `readwrite`); `readonly` uses an explicit read-command whitelist. The mode is optional: an instance without a configured mode defaults to `readonly`.
 - **Command blocklist** for connection-level, administrative, destructive and blocking commands.
 - **Lua scripting disabled by default** (`EVAL`/`EVALSHA`/`FCALL`).
 - **Bounded output** with per-container and global item/character budgets.
@@ -174,7 +174,7 @@ The same file can be selected with `REDIS_MCP_CONFIG=/path/to/config.json`.
 | `REDIS_DB` | ⚪ Optional | `0` | Default logical database when `db` is omitted |
 | `REDIS_TLS` | ⚪ Optional | `false` | Enable TLS |
 | `REDIS_TLS_REJECT_UNAUTHORIZED` | ⚪ Optional | `true` | Verify the server certificate |
-| `REDIS_MODE` | ✅ Required | — | Permission mode: `readonly` or `readwrite` (required for env config unless `--mode` is used) |
+| `REDIS_MODE` | ⚪ Optional | `readonly` | Permission mode: `readonly` or `readwrite` (defaults to `readonly` when omitted) |
 | `REDIS_ALLOWED_DBS` | ⚪ Optional | — | Comma-separated allowlist, e.g. `0,2,4` |
 | `REDIS_ALLOW_SCRIPTING` | ⚪ Optional | `false` | Allow `EVAL`/`EVALSHA`/`FCALL` (see security caveat) |
 | `REDIS_MAX_CONNECTIONS` | ⚪ Optional | `32` | Per-instance connection cache limit (1-256) |
@@ -261,7 +261,7 @@ JSON config and `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` are **mutually exclusive*
 | `db` | ⚪ Optional | `0` | Default logical database |
 | `tls` | ⚪ Optional | `false` | Enable TLS |
 | `tlsRejectUnauthorized` | ⚪ Optional | `true` | Verify the server certificate |
-| `mode` | ✅ Required | — | Permission mode: `readonly` or `readwrite` |
+| `mode` | ⚪ Optional | `readonly` | Permission mode: `readonly` or `readwrite` (defaults to `readonly` when omitted) |
 | `allowScripting` | ⚪ Optional | `false` | Allow `EVAL`/`EVALSHA`/`FCALL` |
 | `allowedDbs` | ⚪ Optional | — | Restrict which logical DBs this instance may access |
 | `maxConnections` | ⚪ Optional | `32` | Cache limit for `(instance, db)` connections |
@@ -439,18 +439,18 @@ Response:
 
 ### Permission modes
 
-The permission mode is an explicit enum. There is no `readOnly` boolean and no implicit default:
+The permission mode is an explicit enum with no `readOnly` boolean. When the mode is not configured, the instance defaults to `readonly`:
 
 | Mode | Behavior |
 | :---: | :---: |
 | `readonly` | Only an explicit read-command whitelist is accepted; `SET`, `HSET`, `DEL`, `RESTORE`, ... are rejected. `EVAL`/`FCALL` remain rejected even if `allowScripting` is true. |
 | `readwrite` | Write commands such as `SET`, `HSET`, `DEL` are allowed; the always-rejected list below still applies, and `EVAL`/`FCALL` are allowed only when `allowScripting` is true. |
 
-Set it in JSON as `"mode": "readonly"` / `"mode": "readwrite"`, in environment configuration with `REDIS_MODE=readonly|readwrite` (required unless `--mode` is provided), or override every instance with `--mode readonly|readwrite`.
+Set it in JSON as `"mode": "readonly"` / `"mode": "readwrite"`, in environment configuration with `REDIS_MODE=readonly|readwrite`, or override every instance with `--mode readonly|readwrite`. Precedence: `--mode` wins over `REDIS_MODE` / the instance `mode` field; an instance with no mode configured at all is `readonly`.
 
 `REDIS_MODE` cannot be combined with a JSON config file; set `mode` per instance instead (or use `--mode` to override all instances).
 
-Use a Redis ACL with a read-only user as a second layer of defense — `readonly` mode is a convenience, not a replacement for server-side ACLs.
+With no mode configured the instance is read-only; set `mode: "readwrite"` (JSON), `REDIS_MODE=readwrite` (environment) or `--mode readwrite` explicitly to allow writes. Use a Redis ACL with a read-only user as a second layer of defense — `readonly` mode is a convenience, not a replacement for server-side ACLs.
 
 **Migration:** `readOnly` (JSON), `REDIS_READONLY` and `--readonly` were removed. Use `mode`, `REDIS_MODE` and `--mode` instead.
 

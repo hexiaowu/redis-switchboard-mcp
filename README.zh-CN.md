@@ -35,7 +35,7 @@ Redis 的 `SELECT` 改变的是**连接**的数据库，而不是某一条命令
 
 - **每次调用切换逻辑库**（`db: 0-255`）。
 - **多 Redis 实例**：JSON 配置，通过 `instance` 参数选择。
-- **显式权限模式**（`readonly` / `readwrite`）；`readonly` 使用显式读命令白名单。
+- **显式权限模式**（`readonly` / `readwrite`）；`readonly` 使用显式读命令白名单。权限模式可省略：未配置时实例默认为 `readonly`。
 - **命令黑名单**：连接状态、管理、破坏性、阻塞类命令。
 - **默认禁用 Lua**（`EVAL` / `EVALSHA` / `FCALL`）。
 - **输出截断**：单容器 + 全局 item / 字符预算。
@@ -176,7 +176,7 @@ node dist/index.js
 | `REDIS_DB` | ⚪ 可选 | `0` | 工具未传 `db` 时的默认逻辑库 |
 | `REDIS_TLS` | ⚪ 可选 | `false` | 启用 TLS |
 | `REDIS_TLS_REJECT_UNAUTHORIZED` | ⚪ 可选 | `true` | 是否校验证书 |
-| `REDIS_MODE` | ✅ 必填 | — | 权限模式：`readonly` 或 `readwrite`（未使用 `--mode` 时必填） |
+| `REDIS_MODE` | ⚪ 可选 | `readonly` | 权限模式：`readonly` 或 `readwrite`（省略时默认 `readonly`） |
 | `REDIS_ALLOWED_DBS` | ⚪ 可选 | — | 逗号分隔的库白名单，例如 `0,2,4` |
 | `REDIS_ALLOW_SCRIPTING` | ⚪ 可选 | `false` | 允许 `EVAL` / `EVALSHA` / `FCALL`（见安全说明） |
 | `REDIS_MAX_CONNECTIONS` | ⚪ 可选 | `32` | 每个实例的连接缓存上限（1-256） |
@@ -263,7 +263,7 @@ JSON 配置和 `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` 是**互斥**的：同时�
 | `db` | ⚪ 可选 | `0` | 默认逻辑库 |
 | `tls` | ⚪ 可选 | `false` | 启用 TLS |
 | `tlsRejectUnauthorized` | ⚪ 可选 | `true` | 校验证书 |
-| `mode` | ✅ 必填 | — | 权限模式：`readonly` 或 `readwrite` |
+| `mode` | ⚪ 可选 | `readonly` | 权限模式：`readonly` 或 `readwrite`（省略时默认 `readonly`） |
 | `allowScripting` | ⚪ 可选 | `false` | 允许 `EVAL` / `EVALSHA` / `FCALL` |
 | `allowedDbs` | ⚪ 可选 | — | 限制该实例可访问的逻辑库 |
 | `maxConnections` | ⚪ 可选 | `32` | `(instance, db)` 连接缓存上限 |
@@ -441,18 +441,18 @@ JSON 配置和 `REDIS_HOST`/`REDIS_PORT`/`REDIS_MODE` 是**互斥**的：同时�
 
 ### 权限模式
 
-权限模式是显式枚举，没有 `readOnly` 布尔值，也没有隐式默认值：
+权限模式是显式枚举，没有 `readOnly` 布尔值。未配置权限模式时，实例默认为 `readonly`：
 
 | 模式 | 行为 |
 | :---: | :---: |
 | `readonly` | 只接受显式读命令白名单；`SET`、`HSET`、`DEL`、`RESTORE` 等写命令直接拒绝。即使 `allowScripting: true`，`EVAL`/`FCALL` 也会被拒绝。 |
 | `readwrite` | 允许 `SET`、`HSET`、`DEL` 等写命令；下面的「永远拒绝的命令」仍然生效；`EVAL`/`FCALL` 仅在 `allowScripting: true` 时允许。 |
 
-JSON 里写 `"mode": "readonly"` / `"mode": "readwrite"`；单实例环境变量用 `REDIS_MODE=readonly|readwrite`（未使用 `--mode` 时必填）；`--mode readonly|readwrite` 会覆盖所有实例。
+JSON 里写 `"mode": "readonly"` / `"mode": "readwrite"`；单实例环境变量用 `REDIS_MODE=readonly|readwrite`；`--mode readonly|readwrite` 会覆盖所有实例。优先级：`--mode` 高于 `REDIS_MODE` / 实例 `mode` 字段；完全未配置模式时为 `readonly`。
 
 `REDIS_MODE` 不能和 JSON 配置文件同时使用，请在每个实例里配置 `mode`（或用 `--mode` 覆盖所有实例）。
 
-建议同时配置只读 Redis ACL 作为第二层防护——`readonly` 模式是便利措施，不能替代服务端 ACL。
+未配置模式时实例为只读；需要写入请显式设置 `mode: "readwrite"`（JSON）、`REDIS_MODE=readwrite`（环境变量）或 `--mode readwrite`。建议同时配置只读 Redis ACL 作为第二层防护——`readonly` 模式是便利措施，不能替代服务端 ACL。
 
 **迁移说明：** `readOnly`（JSON）、`REDIS_READONLY` 和 `--readonly` 已移除，请改用 `mode`、`REDIS_MODE` 和 `--mode`。
 

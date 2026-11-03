@@ -5,6 +5,13 @@ import { ConfigError, errorMessage } from './errors.js';
 
 export type PermissionMode = 'readonly' | 'readwrite';
 
+/**
+ * Permission mode used when neither the CLI (`--mode`), the environment
+ * (`REDIS_MODE`), nor the JSON instance `mode` field specifies one.
+ * Defaults to 'readonly' so unspecified instances cannot mutate data.
+ */
+export const DEFAULT_MODE: PermissionMode = 'readonly';
+
 export const MAX_DB_INDEX = 255;
 export const MAX_INSTANCES = 64;
 
@@ -37,6 +44,7 @@ export interface InstanceConfig {
   db: number;
   tls: boolean;
   tlsRejectUnauthorized: boolean;
+  /** Permission mode. Defaults to {@link DEFAULT_MODE} ('readonly') when omitted everywhere. */
   mode: PermissionMode;
   /** Allow EVAL/EVALSHA/FCALL. Disabled by default because Lua is arbitrary server-side code. */
   allowScripting: boolean;
@@ -267,7 +275,7 @@ function assertSingleInstanceEnvNotCombinedWithJsonConfig(
   if (hasHost || hasPort || hasMode) {
     throw new ConfigError(
       `REDIS_HOST/REDIS_PORT/REDIS_MODE cannot be combined with a JSON config file (${source}); ` +
-        'define host/port/mode per instance in the JSON config instead.',
+        'define host/port and mode per instance in the JSON config instead (mode defaults to readonly).',
     );
   }
 }
@@ -289,12 +297,8 @@ function buildSingleInstance(cli: CliOptions, env: NodeJS.ProcessEnv): AppConfig
   const envMode = envString(env, 'REDIS_MODE');
   const mode =
     cli.mode ??
-    (envMode === undefined ? undefined : parsePermissionMode(envMode, 'REDIS_MODE'));
-  if (mode === undefined) {
-    throw new ConfigError(
-      'REDIS_MODE is required when not using a JSON config file ("readonly" or "readwrite").',
-    );
-  }
+    (envMode === undefined ? undefined : parsePermissionMode(envMode, 'REDIS_MODE')) ??
+    DEFAULT_MODE;
 
   const username = envRawString(env, 'REDIS_USERNAME');
   const password = envRawString(env, 'REDIS_PASSWORD');
@@ -360,7 +364,7 @@ function parseInstance(raw: unknown, context: string, env: NodeJS.ProcessEnv): I
     throw new ConfigError(`${context}.port is required.`);
   }
 
-  const mode = readPermissionMode(object, 'mode', context);
+  const mode = readOptionalPermissionMode(object, 'mode', context) ?? DEFAULT_MODE;
 
   const db = readOptionalInt(object, 'db', context, 0, MAX_DB_INDEX) ?? 0;
 
@@ -535,14 +539,14 @@ function resolveConfigPath(path: string, cwd: string): string {
   return resolve(cwd, path);
 }
 
-function readPermissionMode(
+function readOptionalPermissionMode(
   object: Record<string, unknown>,
   key: string,
   context: string,
-): PermissionMode {
+): PermissionMode | undefined {
   const value = readOptionalString(object, key, context);
   if (value === undefined) {
-    throw new ConfigError(`${context}.${key} is required ("readonly" or "readwrite").`);
+    return undefined;
   }
   return parsePermissionMode(value, `${context}.${key}`);
 }

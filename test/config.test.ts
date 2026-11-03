@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, parseCli, parseConfigObject } from '../src/config.js';
+import { DEFAULT_MODE, loadConfig, parseCli, parseConfigObject } from '../src/config.js';
 
 const baseInstance = { name: 'a', host: 'localhost', port: 6_379, mode: 'readwrite' };
 
@@ -96,9 +96,33 @@ test('parseConfigObject requires host and port', () => {
     /host is required/,
   );
   assert.throws(
-    () => parseConfigObject({ instances: [{ name: 'a', host: 'localhost', port: 6_379 }] }, 'test'),
-    /mode is required/,
+    () =>
+      parseConfigObject(
+        { instances: [{ name: 'a', host: 'localhost', port: 6_379, mode: 'admin' }] },
+        'test',
+      ),
+    /readonly.*readwrite/,
   );
+});
+
+test('parseConfigObject defaults mode to readonly when omitted', () => {
+  const config = parseConfigObject(
+    { instances: [{ name: 'a', host: 'localhost', port: 6_379 }] },
+    'test',
+  );
+  assert.equal(config.instances[0]!.mode, DEFAULT_MODE);
+  assert.equal(config.instances[0]!.mode, 'readonly');
+});
+
+test('parseConfigObject keeps an explicit readwrite mode', () => {
+  const config = parseConfigObject(
+    { instances: [{ name: 'a', host: 'localhost', port: 6_379, mode: 'readwrite' }] },
+    'test',
+  );
+  assert.equal(config.instances[0]!.mode, 'readwrite');
+});
+
+test('parseConfigObject rejects invalid mode values', () => {
   assert.throws(
     () =>
       parseConfigObject(
@@ -270,14 +294,23 @@ test('loadConfig requires REDIS_HOST and REDIS_PORT for environment configuratio
     () => loadConfig({ cli: parseCli([]), env: { REDIS_HOST: '   ', REDIS_PORT: '6379' } }),
     /REDIS_HOST is required/,
   );
-  assert.throws(
-    () =>
-      loadConfig({
-        cli: parseCli([]),
-        env: { REDIS_HOST: 'localhost', REDIS_PORT: '6379' },
-      }),
-    /REDIS_MODE is required/,
-  );
+});
+
+test('loadConfig defaults REDIS_MODE to readonly for environment configuration', () => {
+  const config = loadConfig({
+    cli: parseCli([]),
+    env: { REDIS_HOST: 'localhost', REDIS_PORT: '6379' },
+  });
+  assert.equal(config.instances[0]!.mode, DEFAULT_MODE);
+  assert.equal(config.instances[0]!.mode, 'readonly');
+});
+
+test('REDIS_MODE is case-insensitive and overrides the readonly default', () => {
+  const config = loadConfig({
+    cli: parseCli([]),
+    env: { REDIS_HOST: 'localhost', REDIS_PORT: '6379', REDIS_MODE: 'ReadWrite' },
+  });
+  assert.equal(config.instances[0]!.mode, 'readwrite');
 });
 
 test('environment passwords keep leading and trailing whitespace', () => {
@@ -375,6 +408,44 @@ test('loadConfig accepts --config and applies --mode to every instance', () => {
 
   assert.equal(config.instances.length, 2);
   assert.equal(config.instances.every((instance) => instance.mode === 'readonly'), true);
+});
+
+test('--mode overrides JSON instances that omit mode', () => {
+  writeFileSync(
+    join(directory, 'modeless.json'),
+    JSON.stringify({
+      instances: [
+        { name: 'a', host: 'a.example', port: 6_379 },
+        { name: 'b', host: 'b.example', port: 6_379, mode: 'readonly' },
+      ],
+    }),
+  );
+
+  const config = loadConfig({
+    cli: parseCli(['--config', 'modeless.json', '--mode', 'readwrite']),
+    env: {},
+    cwd: directory,
+  });
+
+  assert.equal(config.instances.every((instance) => instance.mode === 'readwrite'), true);
+});
+
+test('JSON config without mode defaults every instance to readonly', () => {
+  writeFileSync(
+    join(directory, 'default-mode.json'),
+    JSON.stringify({
+      instances: [{ name: 'a', host: 'a.example', port: 6_379 }],
+    }),
+  );
+
+  const config = loadConfig({
+    cli: parseCli(['--config', 'default-mode.json']),
+    env: {},
+    cwd: directory,
+  });
+
+  assert.equal(config.instances[0]!.mode, DEFAULT_MODE);
+  assert.equal(config.instances[0]!.mode, 'readonly');
 });
 
 test('--config conflicts with --db', () => {

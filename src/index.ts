@@ -93,7 +93,7 @@ function printHelp(version: string): void {
       '  REDIS_USERNAME / REDIS_PASSWORD  ACL credentials',
       '  REDIS_DB                         Default logical database (default: 0)',
       '  REDIS_NAME                       Instance name (default: default)',
-      '  REDIS_MODE                       "readonly" or "readwrite" (required for env config)',
+      '  REDIS_MODE                       "readonly" or "readwrite" (default: readonly)',
       '  REDIS_TLS                        "1" to enable TLS',
       '  REDIS_TLS_REJECT_UNAUTHORIZED    "0" to skip certificate verification',
       '  REDIS_ALLOWED_DBS                Comma-separated allowlist, e.g. "0,2,4"',

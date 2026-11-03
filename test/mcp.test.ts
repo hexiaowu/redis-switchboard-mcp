@@ -43,7 +43,7 @@ test('MCP server completes the handshake and exposes four tools', { timeout: 30_
       REDIS_MCP_CONFIG: '',
       REDIS_HOST: '127.0.0.1',
       REDIS_PORT: String(closedPort),
-      REDIS_MODE: 'readwrite',
+      // No REDIS_MODE: the server must start with the 'readonly' default.
       REDIS_CONNECT_TIMEOUT_MS: '300',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
