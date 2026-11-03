@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer, type AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 interface JsonRpcMessage {
@@ -14,6 +15,11 @@ interface JsonRpcMessage {
 }
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
+const packageVersion = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 async function getClosedPort(): Promise<number> {
   const server = createServer();
@@ -103,7 +109,7 @@ test('MCP server completes the handshake and exposes four tools', { timeout: 30_
     const serverInfo = (initialized.result as { serverInfo?: { name?: string; version?: string } })
       ?.serverInfo;
     assert.equal(serverInfo?.name, 'redis-switchboard-mcp');
-    assert.equal(serverInfo?.version, '0.1.0');
+    assert.equal(serverInfo?.version, packageVersion);
 
     child.stdin.write(
       `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`,
