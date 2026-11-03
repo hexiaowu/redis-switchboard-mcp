@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: read
-  # Required for npm provenance and for npm Trusted Publishing (OIDC).
+  # Required for npm Trusted Publishing (OIDC) and provenance.
   id-token: write
 
 concurrency:
@@ -34,25 +34,27 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # npm Trusted Publishing requires Node.js 22.14.0 or newer.
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
           cache: npm
 
       - name: Use the latest npm
+        # Trusted Publishing requires npm 11.5.1 or newer.
         run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
 
+      # Trusted Publishing uses GitHub OIDC, so no NPM_TOKEN is needed.
+      # Configure it once on npm:
+      #   Package settings -> Trusted Publisher -> GitHub Actions
+      #   owner: hexiaowu
+      #   repository: redis-switchboard-mcp
+      #   workflow filename: publish.yml
+      #   environment: leave blank
+      #
       # prepublishOnly runs typecheck, test typecheck, build and the full test
       # suite. If any of them fail, npm publish stops before uploading.
       - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          # Add this secret in GitHub: Settings -> Secrets and variables -> Actions.
-          # Use a granular npm token with Read and write access and Bypass 2FA.
-          #
-          # For npm Trusted Publishing (OIDC, no long-lived token), configure the
-          # trusted publisher on npm for this repository and workflow, then remove
-          # this NODE_AUTH_TOKEN block.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

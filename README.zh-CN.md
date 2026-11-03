@@ -553,20 +553,37 @@ test/               单元、集成和 MCP 握手测试
 发布由 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) 自动化：
 
 - **发布 GitHub Release** 时触发，或通过 `workflow_dispatch` 手动指定已有 tag。
-- 检出对应 tag、安装依赖，然后执行 `npm publish --access public --provenance`。
+- 使用 **npm Trusted Publishing（GitHub OIDC）**，不需要长期 npm token。
+- 检出对应 tag、安装依赖，然后执行 `npm publish --access public`。
 - 上传前 `prepublishOnly` 会跑类型检查、测试类型检查、构建和完整测试。
 
-### 一次性配置
+### 一次性配置（Trusted Publishing）
 
-**方式 A：npm token（简单）**
+1. 打开 npm 包设置 → **Trusted Publisher** → **GitHub Actions**。
+2. 填写：
+   - **Organization or user：** `hexiaowu`
+   - **Repository：** `redis-switchboard-mcp`
+   - **Workflow filename：** `publish.yml`（只写文件名，带 `.yml`，不要写 `.github/workflows/`）
+   - **Environment name：** 留空
+3. 点击 **Add trusted publisher** —— 这个按钮不叫 “Save”。
+4. 配置后的第一次发布要在 **2 天**内成功，否则该 trusted publisher 配置会失效。
 
-1. 创建 granular npm token，权限选 **Read and write**，包范围包含 `redis-switchboard-mcp`，并开启 **Bypass 2FA**。
-2. GitHub：**Settings → Secrets and variables → Actions → New repository secret**，名称 `NPM_TOKEN`，值为 token。
+如果网页没有显示添加按钮，可以用 npm CLI（npm 11.15+）：
 
-**方式 B：npm Trusted Publishing（推荐，无长期 token）**
+```bash
+npm install -g npm@latest
+npm trust github redis-switchboard-mcp \
+  --file publish.yml \
+  --repo hexiaowu/redis-switchboard-mcp \
+  --allow-publish \
+  --yes
+npm trust list redis-switchboard-mcp
+```
 
-1. 在 npm 包的设置页 → **Trusted Publisher → GitHub Actions**，填写 owner `hexiaowu`、repository `redis-switchboard-mcp`、workflow `publish.yml`。
-2. 删除 workflow 里的 `NODE_AUTH_TOKEN` 环境变量。workflow 已经包含 `id-token: write`。
+workflow 已经包含 `permissions: id-token: write`；npm 会自动生成 provenance，不需要额外传 `--provenance`。
+
+如果你更想用 token，可以添加 `NPM_TOKEN` repository secret，并在 publish step 上设置
+`env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} }`。token 需要 Read and write 权限，并开启 **Bypass 2FA**。
 
 ### 发布流程
 

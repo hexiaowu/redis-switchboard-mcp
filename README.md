@@ -552,20 +552,37 @@ test/               unit, integration and MCP handshake tests
 Publishing is automated by [`.github/workflows/publish.yml`](.github/workflows/publish.yml):
 
 - Triggered when a **GitHub Release is published**, or manually via `workflow_dispatch` with an existing tag.
-- Checks out the tag, installs dependencies, then runs `npm publish --access public --provenance`.
+- Uses **npm Trusted Publishing (GitHub OIDC)** — no long-lived npm token.
+- Checks out the tag, installs dependencies, then runs `npm publish --access public`.
 - `prepublishOnly` runs typecheck, test typecheck, build and the full test suite before uploading.
 
-### One-time setup
+### One-time setup (Trusted Publishing)
 
-**Option A: npm token (simple)**
+1. Open the npm package settings → **Trusted Publisher** → **GitHub Actions**.
+2. Fill in:
+   - **Organization or user:** `hexiaowu`
+   - **Repository:** `redis-switchboard-mcp`
+   - **Workflow filename:** `publish.yml` (filename only, include `.yml`; do not include `.github/workflows/`)
+   - **Environment name:** leave blank
+3. Click **Add trusted publisher** — the button is not labeled “Save”.
+4. The first publish after configuring must succeed within 2 days to validate the setup.
 
-1. Create a granular npm access token with **Read and write** access to `redis-switchboard-mcp` and **Bypass 2FA** enabled.
-2. In GitHub: **Settings → Secrets and variables → Actions → New repository secret**, name `NPM_TOKEN`, value the token.
+If the website does not show the add control, use the npm CLI (npm 11.15+):
 
-**Option B: npm Trusted Publishing (recommended, no long-lived token)**
+```bash
+npm install -g npm@latest
+npm trust github redis-switchboard-mcp \
+  --file publish.yml \
+  --repo hexiaowu/redis-switchboard-mcp \
+  --allow-publish \
+  --yes
+npm trust list redis-switchboard-mcp
+```
 
-1. On the npm package settings → **Trusted Publisher → GitHub Actions**, set owner `hexiaowu`, repository `redis-switchboard-mcp`, workflow `publish.yml`.
-2. Remove the `NODE_AUTH_TOKEN` env block from the workflow. The workflow already has `id-token: write`.
+The workflow already has `permissions: id-token: write`; npm generates provenance automatically, so `--provenance` is not required.
+
+If you prefer a token instead, add an `NPM_TOKEN` repository secret and put
+`env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} }` on the publish step. Use a granular token with Read and write access and **Bypass 2FA** enabled.
 
 ### Release flow
 
