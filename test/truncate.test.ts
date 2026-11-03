@@ -100,3 +100,24 @@ test('truncateString reports whether it cut the value', () => {
   assert.deepEqual(truncateString('abc', 10), { value: 'abc', truncated: false });
   assert.deepEqual(truncateString('abcdef', 3), { value: 'abc', truncated: true });
 });
+
+test('truncateString never emits a lone surrogate', () => {
+  assert.deepEqual(truncateString('😀', 1), { value: '', truncated: true });
+  assert.deepEqual(truncateString('a😀b', 2), { value: 'a', truncated: true });
+  assert.deepEqual(truncateString('a😀b', 3), { value: 'a😀', truncated: true });
+  assert.deepEqual(truncateString('😀', 3), { value: '😀', truncated: false });
+  assert.deepEqual(truncateString('abc', 2), { value: 'ab', truncated: true });
+});
+
+test('truncateReply keeps surrogate pairs intact at the character cap', () => {
+  const result = truncateReply('a😀b', { maxItems: 3, maxChars: 2, maxDepth: 3 });
+  assert.equal(result.value, 'a');
+  assert.equal(result.truncated, true);
+  assert.match(result.notes[0] ?? '', /string truncated from 4 to 1 characters/);
+
+  // A cut between two complete pairs keeps both characters (counts stay in
+  // code units, so 4 units cut to 2 still reports truncated).
+  const pairBoundary = truncateReply('😀😀', { maxItems: 3, maxChars: 2, maxDepth: 3 });
+  assert.equal(pairBoundary.value, '😀');
+  assert.equal(pairBoundary.truncated, true);
+});

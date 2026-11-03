@@ -18,6 +18,25 @@ const MAX_NOTES = 20;
 const BUDGET_MARKER = '[Truncated: result size budget reached]';
 
 /**
+ * Avoid splitting a UTF-16 surrogate pair. Counts stay in code units: when the
+ * cut lands between a high and its low surrogate, the cap is reduced by one so
+ * the pair is excluded entirely instead of emitting a lone surrogate.
+ */
+function surrogateSafeCap(value: string, cap: number): number {
+  if (cap <= 0 || cap >= value.length) {
+    return cap;
+  }
+  const high = value.charCodeAt(cap - 1);
+  if (high >= 0xd800 && high <= 0xdbff) {
+    const low = value.charCodeAt(cap);
+    if (low >= 0xdc00 && low <= 0xdfff) {
+      return cap - 1;
+    }
+  }
+  return cap;
+}
+
+/**
  * Convert a Redis reply into a JSON-safe value while bounding its size.
  *
  * Redis replies are normally strings, numbers, nulls and nested arrays. We also
@@ -77,11 +96,12 @@ export function truncateReply(reply: unknown, limits: TruncationLimits): Truncat
       return '[Truncated: character budget reached]';
     }
 
-    const output = value.slice(0, cap);
+    const cut = surrogateSafeCap(value, cap);
+    const output = value.slice(0, cut);
     usedChars += output.length;
-    if (value.length > cap) {
+    if (value.length > cut) {
       truncated = true;
-      pushNote(`${path}: string truncated from ${value.length} to ${cap} characters`);
+      pushNote(`${path}: string truncated from ${value.length} to ${cut} characters`);
     }
     return output;
   }
@@ -249,5 +269,5 @@ export function truncateString(value: string, maxChars: number): { value: string
   if (value.length <= maxChars) {
     return { value, truncated: false };
   }
-  return { value: value.slice(0, maxChars), truncated: true };
+  return { value: value.slice(0, surrogateSafeCap(value, maxChars)), truncated: true };
 }

@@ -7,7 +7,6 @@ import { jsonResult, runTool } from './common.js';
 const MAX_LIMIT = 10_000;
 const MAX_BATCH = 1_000;
 const MAX_KEY_NAME_CHARS = 4_096;
-const SCAN_CHAR_BUDGET = 1_000_000;
 
 export const scanKeysInputSchema = z.object({
   pattern: z
@@ -71,6 +70,9 @@ export function createScanKeysHandler(
 
       const client = await provider.getClient(instance, db);
 
+      // Whole-batch character budget, derived from the instance output cap.
+      const scanCharBudget = instance.maxFetchChars;
+
       const keys: string[] = [];
       const seen = new Set<string>();
       const returnedNames = new Set<string>();
@@ -118,7 +120,7 @@ export function createScanKeysHandler(
           keys.push(limitedKey.value);
           outputChars += limitedKey.value.length;
 
-          if (outputChars >= SCAN_CHAR_BUDGET) {
+          if (outputChars >= scanCharBudget) {
             charBudgetReached = true;
           }
         }
@@ -143,7 +145,7 @@ export function createScanKeysHandler(
       }
       if (hasMore && charBudgetReached) {
         notes.push(
-          `Result character budget (${SCAN_CHAR_BUDGET}) reached; returned the whole SCAN batch so no keys were dropped. Pass the returned cursor to continue.`,
+          `Result character budget (${scanCharBudget}) reached; returned the whole SCAN batch so no keys were dropped. Pass the returned cursor to continue.`,
         );
       }
       if (stoppedByIterationLimit) {

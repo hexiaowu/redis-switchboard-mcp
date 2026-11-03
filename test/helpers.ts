@@ -24,6 +24,8 @@ export function makeInstance(overrides: Partial<InstanceConfig> = {}): InstanceC
     maxScanIterations: 5,
     scanTimeBudgetMs: 10_000,
     maxConnections: 32,
+    idleTimeoutMs: 300_000,
+    poolSize: 4,
     ...overrides,
   };
 }
@@ -83,6 +85,14 @@ export class FakeClient implements RedisClient {
       return this.commandReplies[upper];
     }
     return this.callReply;
+  }
+
+  async callBuffer(command: string, ...args: (string | number | Buffer)[]): Promise<Buffer> {
+    const reply = await this.call(command, ...args);
+    if (Buffer.isBuffer(reply)) {
+      return reply;
+    }
+    return Buffer.from(typeof reply === 'string' ? reply : String(reply ?? ''), 'utf8');
   }
 
   async scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]> {

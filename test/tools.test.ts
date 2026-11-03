@@ -254,7 +254,15 @@ test('scan_keys stops when the time budget is exhausted', async () => {
 
 test('execute maps client timeouts to COMMAND_ERROR with a retry warning', async () => {
   const client = new FakeClient();
-  client.callError = new Error('Command timed out');
+  // Only the real command times out. Guard probes (STRLEN for GET) must succeed,
+  // otherwise the fail-closed size check rejects the command before it runs.
+  const guardProbe = client.call.bind(client);
+  client.call = async (command: string, ...args: (string | number | Buffer)[]) => {
+    if (command.toUpperCase() === 'GET') {
+      throw new Error('Command timed out');
+    }
+    return guardProbe(command, ...args);
+  };
   const execute = createExecuteHandler(new FakeProvider(makeInstance(), client));
 
   const result = await execute({ command: 'GET key' });
@@ -365,4 +373,25 @@ test('key_info degrades gracefully when optional commands fail', async () => {
   assert.equal(json.memoryUsageBytes, null);
   assert.equal(json.length, null);
   assert.equal((json.warnings as string[]).length, 2);
+});
+
+test('scan_keys stops at the character budget derived from maxFetchChars', async () => {
+  const client = new FakeClient();
+  client.scanResults = [
+    ['5', ['a'.repeat(10), 'bb']],
+    ['0', []],
+  ];
+  const scan = createScanKeysHandler(
+    new FakeProvider(makeInstance({ maxFetchChars: 10, maxResultItems: 10 }), client),
+  );
+
+  const json = resultJson(await scan({ pattern: '*', count: 10 }));
+
+  // The whole batch is kept (the cursor already advanced past it).
+  assert.deepEqual(json.keys, ['aaaaaaaaaa', 'bb']);
+  assert.equal(json.outputChars, 12);
+  assert.equal(json.cursor, '5');
+  assert.equal(json.hasMore, true);
+  assert.equal(json.complete, false);
+  assert.match(String(json.notes), /Result character budget \(10\) reached/);
 });

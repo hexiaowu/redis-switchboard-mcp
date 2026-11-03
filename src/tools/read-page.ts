@@ -55,9 +55,28 @@ export const readPageInputSchema = z.object({
 
 export type ReadPageArgs = z.infer<typeof readPageInputSchema>;
 
-interface ReadPageNotes {
+interface ReadPageContext {
   notes: string[];
+  outputBytes: number;
+  /**
+   * Output byte budget for offset-based kinds (list/zset/stream). Their next
+   * page is addressable, so items may be dropped when the budget is hit.
+   * Hash/set pages use a SCAN cursor — dropping items there would lose them
+   * permanently, so the budget does not apply.
+   */
+  budget: { maxBytes: number; exceeded: boolean } | null;
 }
+
+const COLLECTION_LENGTH_COMMANDS: Record<
+  Exclude<ReadPageArgs['kind'], 'string'>,
+  string
+> = {
+  list: 'LLEN',
+  hash: 'HLEN',
+  set: 'SCARD',
+  zset: 'ZCARD',
+  stream: 'XLEN',
+};
 
 export function createReadPageHandler(
   provider: RedisProvider,
@@ -78,7 +97,7 @@ export function createReadPageHandler(
                 instance.maxFetchChars / (perItem * Math.max(1, instance.maxResultChars)),
               ),
             );
-      const limit = Math.min(args.limit, instance.maxFetchItems, MAX_PAGE_LIMIT, limitCap);
+      let limit = Math.min(args.limit, instance.maxFetchItems, MAX_PAGE_LIMIT, limitCap);
 
       const notes: string[] = [];
       if (limit < args.limit) {
@@ -87,24 +106,63 @@ export function createReadPageHandler(
         );
       }
 
+      // The static cap assumes each item is at most maxResultChars characters,
+      // but a single Redis value can be far larger. Probe MEMORY USAGE and the
+      // collection length to bound the page by average item size. One extra
+      // round trip per page; kind="string" is already byte-bounded by its
+      // GETRANGE window.
+      if (args.kind !== 'string') {
+        const lengthCommand = COLLECTION_LENGTH_COMMANDS[args.kind];
+        const [lengthReply, memoryReply] = await Promise.all([
+          client.call(lengthCommand, args.key).catch(() => null),
+          client
+            .call('MEMORY', 'USAGE', args.key)
+            .catch(() => null),
+        ]);
+        const length = toNumber(lengthReply);
+        const memory = toNumber(memoryReply);
+        if (length > 0 && memory > 0) {
+          const avgBytes = memory / length;
+          const byteCap = Math.max(1, Math.floor(instance.maxFetchChars / Math.max(1, avgBytes)));
+          if (byteCap < limit) {
+            limit = byteCap;
+            notes.push(
+              `Page limit reduced to ${limit} by MEMORY USAGE (avg ${Math.round(avgBytes)} bytes/item, maxFetchChars=${instance.maxFetchChars}).`,
+            );
+          }
+        }
+      }
+
       let truncatedItems = 0;
-      let outputBytes = 0;
+      const context: ReadPageContext = {
+        notes,
+        outputBytes: 0,
+        budget:
+          args.kind === 'list' || args.kind === 'zset' || args.kind === 'stream'
+            ? { maxBytes: instance.maxFetchChars, exceeded: false }
+            : null,
+      };
       const limitString = (value: string): string => {
         const limited = truncateString(value, instance.maxResultChars);
         if (limited.truncated) {
           truncatedItems += 1;
         }
-        outputBytes += Buffer.byteLength(limited.value, 'utf8');
+        context.outputBytes += Buffer.byteLength(limited.value, 'utf8');
         return limited.value;
       };
 
-      const payload = await readPage(client, args, limit, limitString, { notes });
+      const payload = await readPage(client, args, limit, limitString, context);
       const payloadOutputBytes =
-        args.kind === 'string' ? Number(payload.returned ?? 0) : outputBytes;
+        args.kind === 'string' ? Number(payload.returned ?? 0) : context.outputBytes;
 
       if (truncatedItems > 0) {
         notes.push(
           `${truncatedItems} item string(s) were truncated at maxResultChars=${instance.maxResultChars}.`,
+        );
+      }
+      if (context.budget?.exceeded) {
+        notes.push(
+          `Page truncated at the ${instance.maxFetchChars} byte output budget; pass nextOffset/nextStart to continue.`,
         );
       }
 
@@ -127,11 +185,11 @@ async function readPage(
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
-  context: ReadPageNotes,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   switch (args.kind) {
     case 'list':
-      return readList(client, args, limit, limitString);
+      return readList(client, args, limit, limitString, context);
     case 'string':
       return readString(client, args, limit);
     case 'hash':
@@ -139,10 +197,26 @@ async function readPage(
     case 'set':
       return readSet(client, args, limit, limitString, context);
     case 'zset':
-      return readZset(client, args, limit, limitString);
+      return readZset(client, args, limit, limitString, context);
     case 'stream':
-      return readStream(client, args, limit, limitString);
+      return readStream(client, args, limit, limitString, context);
   }
+}
+
+/**
+ * True when the page's output byte budget is exhausted. Only called for
+ * offset-based kinds; the next page is addressable via nextOffset/nextStart,
+ * so the remaining fetched items can be dropped safely.
+ */
+function outputBudgetReached(context: ReadPageContext): boolean {
+  if (context.budget === null) {
+    return false;
+  }
+  if (context.outputBytes >= context.budget.maxBytes) {
+    context.budget.exceeded = true;
+    return true;
+  }
+  return false;
 }
 
 async function readList(
@@ -150,6 +224,7 @@ async function readList(
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   const offset = args.offset;
   const [reply, totalReply] = await Promise.all([
@@ -157,7 +232,14 @@ async function readList(
     client.call('LLEN', args.key),
   ]);
 
-  const items = (reply as unknown[]).map((item) => limitString(String(item)));
+  const items: string[] = [];
+  for (const item of reply as unknown[]) {
+    if (outputBudgetReached(context)) {
+      break;
+    }
+    items.push(limitString(String(item)));
+  }
+
   const total = toNumber(totalReply);
   const nextOffset = offset + items.length;
 
@@ -181,20 +263,27 @@ async function readString(
   // multi-byte character can be returned for tiny limits.
   const window = Math.max(limit, 4);
   const [reply, totalReply] = await Promise.all([
-    client.call('GETRANGE', args.key, offset, offset + window - 1),
+    client.callBuffer('GETRANGE', args.key, offset, offset + window - 1),
     client.call('STRLEN', args.key),
   ]);
 
-  let chunk = typeof reply === 'string' ? reply : '';
-  // A page ending in the middle of a UTF-8 character decodes with a trailing
-  // replacement character. Drop it and leave nextOffset at the start of the
-  // incomplete character so the next page begins on a character boundary.
-  while (chunk.endsWith('\uFFFD')) {
-    chunk = chunk.slice(0, -1);
+  const raw = reply;
+  // Work at the byte level: a literal U+FFFD (EF BF BD) is a COMPLETE valid
+  // sequence and must be kept, while a lead byte whose continuation bytes were
+  // cut off by the window boundary must be left for the next page.
+  let prefix = raw;
+  if (raw.length > 0) {
+    const boundary = utf8BoundaryPrefix(raw);
+    // If the boundary prefix is empty the window starts with bytes that cannot
+    // begin a valid sequence (for example a lone continuation byte). Consume
+    // the whole window and let the decoder replace them so nextOffset always
+    // advances.
+    prefix = boundary.length === 0 ? raw : boundary;
   }
 
+  const chunk = prefix.toString('utf8');
   const total = toNumber(totalReply);
-  const returnedBytes = Buffer.byteLength(chunk, 'utf8');
+  const returnedBytes = prefix.length;
   const nextOffset = offset + returnedBytes;
 
   return {
@@ -207,12 +296,50 @@ async function readString(
   };
 }
 
+/** Number of bytes a UTF-8 lead byte expects in total (1 for ASCII). */
+function utf8SequenceLength(byte: number): number {
+  if ((byte & 0x80) === 0x00) {
+    return 1;
+  }
+  if ((byte & 0xe0) === 0xc0) {
+    return 2;
+  }
+  if ((byte & 0xf0) === 0xe0) {
+    return 3;
+  }
+  if ((byte & 0xf8) === 0xf0) {
+    return 4;
+  }
+  return 1;
+}
+
+/**
+ * Longest buffer prefix that ends on a UTF-8 character boundary: walk back at
+ * most 3 bytes from the end; if the trailing bytes are an incomplete multibyte
+ * sequence (a lead byte whose continuation bytes are cut off), exclude them.
+ * A complete sequence — including a literal U+FFFD — is kept.
+ */
+function utf8BoundaryPrefix(buffer: Buffer): Buffer {
+  const length = buffer.length;
+  for (let back = 1; back <= 3 && back <= length; back += 1) {
+    const byte = buffer[length - back]!;
+    if ((byte & 0xc0) === 0x80) {
+      continue; // continuation byte; keep looking for the lead byte
+    }
+    return utf8SequenceLength(byte) > back ? buffer.subarray(0, length - back) : buffer;
+  }
+  // The last (up to) three bytes are all continuation bytes. Either a complete
+  // 4-byte sequence ends the window, or the data never started a valid
+  // sequence (an empty prefix signals the lossy full-window decode).
+  return length <= 3 ? buffer.subarray(0, 0) : buffer;
+}
+
 async function readHash(
   client: RedisClient,
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
-  context: ReadPageNotes,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   const cursor = args.cursor === undefined ? '0' : String(args.cursor);
   const scanArgs: (string | number)[] = ['HSCAN', args.key, cursor, 'COUNT', limit];
@@ -264,7 +391,7 @@ async function readSet(
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
-  context: ReadPageNotes,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   const cursor = args.cursor === undefined ? '0' : String(args.cursor);
   const scanArgs: (string | number)[] = ['SSCAN', args.key, cursor, 'COUNT', limit];
@@ -311,6 +438,7 @@ async function readZset(
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   const offset = args.offset;
   const rangeArgs: (string | number)[] = ['ZRANGE', args.key, offset, offset + limit - 1];
@@ -327,6 +455,9 @@ async function readZset(
 
   if (args.withScores) {
     for (let index = 0; index + 1 < flat.length; index += 2) {
+      if (outputBudgetReached(context)) {
+        break;
+      }
       items.push({
         member: limitString(flat[index]!),
         score: toScore(flat[index + 1] ?? ''),
@@ -334,6 +465,9 @@ async function readZset(
     }
   } else {
     for (const member of flat) {
+      if (outputBudgetReached(context)) {
+        break;
+      }
       items.push(limitString(member));
     }
   }
@@ -357,6 +491,7 @@ async function readStream(
   args: ReadPageArgs,
   limit: number,
   limitString: (value: string) => string,
+  context: ReadPageContext,
 ): Promise<Record<string, unknown>> {
   const start = args.start ?? '-';
   const end = args.end ?? '+';
@@ -367,15 +502,21 @@ async function readStream(
   ]);
   const entries = reply as [string, string[]][];
 
-  const items = entries.map(([id, fields]) => {
+  const items: { id: string; fields: [string, string][] }[] = [];
+  for (const [id, fields] of entries) {
+    if (outputBudgetReached(context)) {
+      break;
+    }
     const pairs: [string, string][] = [];
     for (let index = 0; index + 1 < fields.length; index += 2) {
       pairs.push([limitString(fields[index]!), limitString(fields[index + 1]!)]);
     }
-    return { id, fields: pairs };
-  });
+    items.push({ id, fields: pairs });
+  }
 
-  const complete = items.length < limit;
+  // complete is only true when the stream ended naturally (XRANGE returned
+  // fewer entries than COUNT and the output budget did not cut the page).
+  const complete = !context.budget?.exceeded && entries.length < limit;
   const last = items[items.length - 1];
   const nextStart = complete || last === undefined ? null : `(${last.id}`;
 
