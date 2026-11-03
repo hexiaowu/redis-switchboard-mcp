@@ -129,6 +129,12 @@ The same file can be selected with `REDIS_MCP_CONFIG=/path/to/config.json`.
 
 > **Note:** diagnostics are written to stderr. Never print to stdout from this process — the MCP transport owns it.
 
+> **Running from this repository:** if the MCP client sets `cwd` to the repository root, use
+> `"command": "node", "args": ["/absolute/path/to/redis-switchboard-mcp/dist/index.js"]`
+> (or a globally installed `rsm`) instead of `npx`. Running `npx redis-switchboard-mcp` from the
+> package's own directory makes npx treat it as the local package, and it can fail with
+> `sh: rsm: command not found`. Run `npm run build` first so `dist/index.js` exists.
+
 ---
 
 <h2 align="center">⚙️ Configuration</h2>

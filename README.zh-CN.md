@@ -131,6 +131,12 @@ node dist/index.js
 
 > **注意：** 本进程的诊断日志全部写到 stderr。不要向 stdout 输出任何内容——stdout 属于 MCP 传输。
 
+> **在本仓库内运行：** 如果 MCP 客户端把 `cwd` 设为仓库根目录，请使用
+> `"command": "node", "args": ["/absolute/path/to/redis-switchboard-mcp/dist/index.js"]`
+> （或全局安装后的 `rsm`），不要使用 `npx`。在包自己的目录里执行 `npx redis-switchboard-mcp`
+> 会让 npx 把它当成当前本地包，可能报 `sh: rsm: command not found`。先执行 `npm run build`
+> 确保 `dist/index.js` 存在。
+
 ---
 
 <h2 align="center">⚙️ 配置</h2>
