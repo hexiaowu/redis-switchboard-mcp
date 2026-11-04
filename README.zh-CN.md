@@ -15,6 +15,12 @@ key_info   → 类型 / TTL / 内存 / 编码 / 长度
 
 工具的参数和说明由 MCP 客户端通过 `tools/list` 获取；本文档只覆盖配置、安全边界和运行行为。
 
+## 快速开始
+
+1. 确认 Node.js 20+ —— 无需全局安装，客户端会用 `npx -y redis-switchboard-mcp` 启动它。
+2. 把 server 加到 MCP 客户端：[MCP 客户端配置](#mcp-客户端配置)。
+3. 重启客户端并执行 `PING`，正常返回 `PONG`。
+
 ---
 
 ## 为什么需要它
@@ -80,7 +86,11 @@ node dist/index.js
 
 ## MCP 客户端配置
 
+把下面的配置加到 MCP 客户端的 server 配置里——例如 Claude Desktop 使用 `claude_desktop_config.json`。其他客户端（如 VS Code）的文件位置和键名可能不同；这里展示的是通用的 `mcpServers` 结构。
+
 ### 单实例：环境变量
+
+只有一台 Redis 时用这个示例；需要多个环境时再看[多实例](#多实例json-配置文件)。
 
 ```json
 {
@@ -98,6 +108,8 @@ node dist/index.js
   }
 }
 ```
+
+Redis 没有密码时删除 `REDIS_PASSWORD` 这一行。
 
 如果已全局安装，也可以写成 `"command": "rsm"`，不需要 `args`。
 
@@ -127,7 +139,7 @@ node dist/index.js
 { "command": "PING", "db": 0 }
 ```
 
-配置正常时返回 `"reply": "PONG"`。用 `db` 参数指定其他逻辑库，省略时使用实例的 `db`。
+配置正常时返回 `"reply": "PONG"`。用 `db` 参数指定其他逻辑库，省略时使用实例的 `db`。然后就可以让它做实际工作，例如「在 db 2 执行 `GET user:42`」。
 
 ---
 

@@ -15,6 +15,12 @@ key_info   → type / TTL / memory / encoding / length
 
 Tool parameters and descriptions are delivered to the MCP client through `tools/list`; this README covers configuration, safety limits and runtime behavior.
 
+## Quick start
+
+1. Check you are on Node.js 20+ — no global install is needed, the client launches `npx -y redis-switchboard-mcp`.
+2. Add the server to your MCP client: [MCP client configuration](#mcp-client-configuration).
+3. Restart the client and run `PING`; a working setup returns `PONG`.
+
 ---
 
 ## Why this exists
@@ -80,7 +86,11 @@ node dist/index.js
 
 ## MCP client configuration
 
+Add the block below to your MCP client's server configuration — for example `claude_desktop_config.json` for Claude Desktop. Other clients (VS Code, for instance) use different files or keys; the `mcpServers` shape shown here is the common one.
+
 ### Single instance, environment variables
+
+Use this if you have one Redis; see [multiple instances](#multiple-instances-from-a-json-file) only if you need several.
 
 ```json
 {
@@ -98,6 +108,8 @@ node dist/index.js
   }
 }
 ```
+
+Remove `REDIS_PASSWORD` if your Redis requires no authentication.
 
 If the package is installed globally, `"command": "rsm"` with no `args` also works.
 
@@ -127,7 +139,7 @@ Restart the MCP client, then ask it to run a command:
 { "command": "PING", "db": 0 }
 ```
 
-A working setup returns `"reply": "PONG"`. Use the `db` argument to target another logical database; it defaults to the instance `db`.
+A working setup returns `"reply": "PONG"`. Use the `db` argument to target another logical database; it defaults to the instance `db`. Then ask it for real work, for example “run `GET user:42` against db 2”.
 
 ---
 
